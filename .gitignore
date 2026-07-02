@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+# Local player config. Keep this private so git pull does not overwrite
+# keyboard_device, transparency, always-on-top, or other personal settings.
+typecast_config.json
+
+# PyInstaller output.
+build/
+release/
+*.spec
+
+# Local editor/system files.
+.DS_Store
+Thumbs.db

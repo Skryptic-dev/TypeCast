@@ -12,9 +12,11 @@ Background input mode does **not** depend on X11. It can work on X11 or Wayland 
 ## Files
 
 - `main.py` - TypeCast game.
-- `typecast_config.json` - Config file. Set `keyboard_device` here.
+- `typecast_config.example.json` - Starter config copied into `typecast_config.json` on first run.
+- `typecast_config.json` - Local player config. Set `keyboard_device` here. This file is ignored by git.
 - `find_keyboard_devices.py` - Lists likely keyboard devices.
 - `run_typecast.sh` - Runs TypeCast from source.
+- `update_typecast.sh` - Pulls the latest GitHub update.
 - `find_keyboards.sh` - Runs the keyboard device finder.
 - `setup_input_permissions.sh` - Optional helper to add your user to the `input` group.
 - `build_linux.sh` - Optional PyInstaller build script.
@@ -48,6 +50,41 @@ Discord Rich Presence is optional:
 python3 -m pip install pypresence
 ```
 
+## GitHub Setup
+
+This folder is ready to upload as its own GitHub repo.
+
+Upload the contents of this `linuxbuild` folder, not the parent `dist` folder. The repo should look like this:
+
+```text
+main.py
+assets/
+README.md
+run_typecast.sh
+update_typecast.sh
+typecast_config.example.json
+```
+
+Do not upload your personal `typecast_config.json`. It is ignored by `.gitignore` so each player can keep their own keyboard device and settings.
+
+First-time install from GitHub:
+
+```bash
+git clone https://github.com/YOURNAME/YOUR_REPO_NAME.git
+cd YOUR_REPO_NAME
+chmod +x *.sh
+./run_typecast.sh
+```
+
+After that, update with:
+
+```bash
+./update_typecast.sh
+./run_typecast.sh
+```
+
+The first run creates `typecast_config.json` from `typecast_config.example.json`.
+
 ## Quick Run
 
 From this folder:
@@ -64,6 +101,7 @@ If no keyboard device is configured, TypeCast still works while the game window 
 TypeCast looks for these editable files beside the script or executable:
 
 - `typecast_config.json`
+- `typecast_config.example.json`
 - `assets/`
 
 If you build or move the game somewhere else, copy those items into the same folder as `TypeCast`.
@@ -74,10 +112,11 @@ For example, after building, this is the expected layout:
 release/
   TypeCast
   typecast_config.json
+  typecast_config.example.json
   assets/
 ```
 
-The build script copies these into `release/` automatically. If `typecast_config.json` or `assets/` are missing from the folder you run the game from, TypeCast may fall back to bundled defaults or print a file error instead of using your edited files.
+The build script copies these into `release/` automatically. If `typecast_config.json` is missing, `run_typecast.sh` and `build_linux.sh` create it from `typecast_config.example.json`.
 
 ## Scene-Only Assets
 
@@ -300,6 +339,7 @@ The build script also copies these editable files into `release/`:
 
 ```text
 release/typecast_config.json
+release/typecast_config.example.json
 release/assets/
 release/find_keyboard_devices.py
 ```

@@ -20,6 +20,16 @@ if ! python3 -c "import PyInstaller" >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ ! -f "$SCRIPT_DIR/typecast_config.json" ]; then
+  if [ -f "$SCRIPT_DIR/typecast_config.example.json" ]; then
+    cp "$SCRIPT_DIR/typecast_config.example.json" "$SCRIPT_DIR/typecast_config.json"
+    echo "Created local typecast_config.json from typecast_config.example.json"
+  else
+    echo "typecast_config.json is missing, and no example config was found." >&2
+    exit 1
+  fi
+fi
+
 python3 -m PyInstaller \
   --clean \
   --noconfirm \
@@ -40,6 +50,7 @@ python3 -m PyInstaller \
 rm -rf "$SCRIPT_DIR/build"
 
 cp "$SCRIPT_DIR/typecast_config.json" "$SCRIPT_DIR/release/typecast_config.json"
+cp "$SCRIPT_DIR/typecast_config.example.json" "$SCRIPT_DIR/release/typecast_config.example.json"
 cp "$SCRIPT_DIR/find_keyboard_devices.py" "$SCRIPT_DIR/release/find_keyboard_devices.py"
 rm -rf "$SCRIPT_DIR/release/assets"
 cp -R "$SCRIPT_DIR/assets" "$SCRIPT_DIR/release/assets"
