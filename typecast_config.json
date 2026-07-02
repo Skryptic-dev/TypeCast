@@ -1,0 +1,29 @@
+{
+  "discord_client_id": "1509267518274146335",
+  "note": "APPID Discord/dev/apps",
+  "keyboard_device": "",
+  "keyboard_device_note": "Linux: run python find_keyboard_devices.py, then set this to /dev/input/eventX or a stable /dev/input/by-id path for background capture.",
+  "custom_theme": {
+    "bg": "#eef6ff",
+    "fg": "#18314f",
+    "sub_fg": "#526d8e",
+    "danger_fg": "#9b1c3d",
+    "button_bg": "#d8eaff",
+    "button_hover": "#f8fcff",
+    "button_pressed": "#bfd9f5",
+    "button_selected": "#c8e0fb",
+    "button_border": "#8ca9c9",
+    "button_light": "#ffffff",
+    "button_dark": "#b3c8de",
+    "root_border": "#afc2d6",
+    "trough": "#d3e3f3",
+    "content_bg": "#fbfdff",
+    "content_fg": "#18314f",
+    "content_select_bg": "#cbe3ff",
+    "content_border": "#c1d3e6",
+    "content_accent": "#5d91c8",
+    "collection_caught_fg": "#247a4a",
+    "collection_missing_fg": "#a33a4f",
+    "collection_header_fg": "#526d8e"
+  }
+}
