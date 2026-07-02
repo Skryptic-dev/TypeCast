@@ -70,8 +70,8 @@ Do not upload your personal `typecast_config.json`. It is ignored by `.gitignore
 First-time install from GitHub:
 
 ```bash
-git clone https://github.com/YOURNAME/YOUR_REPO_NAME.git
-cd YOUR_REPO_NAME
+git clone https://github.com/Skryptic-dev/TypeCast.git
+cd TypeCast
 chmod +x *.sh
 ./run_typecast.sh
 ```
