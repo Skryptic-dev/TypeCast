@@ -2,7 +2,7 @@
 
 TypeCast can load editable PNG files from this folder. If a file is missing, the game falls back to its original code-drawn art.
 
-Images are currently used at `1x` game scale. If the game scale is changed to `1.25x`, `1.5x`, etc., the code-drawn fallback is used so Tk does not display tiny unscaled sprites.
+Images are currently used at `1x` game scale. If the game scale is changed to `0.5x`, `0.75x`, `1.25x`, `1.5x`, etc., the code-drawn fallback is used so Tk does not display unscaled sprites.
 
 Use transparent PNGs for sprites. Use opaque PNGs for full scene replacements.
 

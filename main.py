@@ -56,7 +56,7 @@ THEME_MENU_LABELS = (
 )
 THEME_LABEL_TO_NAME = dict(zip(THEME_MENU_LABELS, THEME_NAMES))
 THEME_NAME_TO_LABEL = {name: label for label, name in THEME_LABEL_TO_NAME.items()}
-GAME_SCALE_LABELS = ("1x", "1.25x", "1.5x", "1.75x", "2x")
+GAME_SCALE_LABELS = ("0.5x", "0.75x", "1x", "1.25x", "1.5x", "1.75x", "2x")
 MENU_SCALE_LABELS = ("0.5x", "0.75x", "1x", "1.25x", "1.5x", "1.75x", "2x")
 SCALE_VALUES = {
     "0.5x": 0.5,

@@ -17,6 +17,7 @@ Background input mode does **not** depend on X11. It can work on X11 or Wayland 
 - `find_keyboard_devices.py` - Lists likely keyboard devices.
 - `run_typecast.sh` - Runs TypeCast from source.
 - `update_typecast.sh` - Pulls the latest GitHub update.
+- `install_gnome_launcher.sh` - Adds a GNOME/Pop!_OS app launcher with the TypeCast window class.
 - `find_keyboards.sh` - Runs the keyboard device finder.
 - `setup_input_permissions.sh` - Optional helper to add your user to the `input` group.
 - `build_linux.sh` - Optional PyInstaller build script.
@@ -62,6 +63,7 @@ assets/
 README.md
 run_typecast.sh
 update_typecast.sh
+install_gnome_launcher.sh
 typecast_config.example.json
 ```
 
@@ -285,6 +287,34 @@ If your system already has a working default rule, you may only need to join the
 TypeCast asks Linux window managers to treat it like a small dialog-style window and sets its window class to `TypeCast`.
 
 Most desktop environments will handle this automatically. If you use a tiling window manager and want TypeCast to float, add a rule for the `TypeCast` class.
+
+### GNOME / Pop!_OS / Pop Shell
+
+Pop!_OS uses GNOME with Pop Shell tiling. TypeCast sets its window class to:
+
+```text
+TypeCast
+```
+
+For best GNOME/Pop!_OS behavior, install the local app launcher once:
+
+```bash
+./install_gnome_launcher.sh
+```
+
+Then close TypeCast and reopen it from the app launcher. The launcher includes:
+
+```text
+StartupWMClass=TypeCast
+```
+
+If Pop Shell tiles TypeCast and you want it floating, use one of these options:
+
+1. Open TypeCast, then use Pop Shell's window menu or keyboard shortcuts to toggle that window to floating.
+2. Open Pop Shell or GNOME extension settings and add a floating window exception for the `TypeCast` app/class.
+3. If the settings UI asks for a window class, use `TypeCast`.
+
+Pop Shell versions and extensions can label this differently, such as floating exceptions, window exceptions, or per-app tiling rules. The important identifier is always `TypeCast`.
 
 Examples:
 
