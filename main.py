@@ -234,7 +234,7 @@ TRANSPARENT_COLOR = "#ff00ff"
 KEYBOARD_KEYS = [vk for vk in range(8, 256) if vk not in (16, 17, 18, 91, 92, 93)]
 BASE_OVERLAY_WIDTH = 320
 MINIMIZED_OVERLAY_HEIGHT = 80
-MINIMIZED_VERTICAL_OVERLAY_WIDTH = 112
+MINIMIZED_VERTICAL_OVERLAY_WIDTH = 88
 MINIMIZED_VERTICAL_OVERLAY_HEIGHT = 320
 FULL_OVERLAY_HEIGHT = 236
 
@@ -4243,7 +4243,7 @@ class TypeCast(tk.Tk):
 
     def resource_delta_position(self, resource, minimized):
         if minimized == "vertical":
-            positions = {"coins": (56, 252), "keys": (56, 270), "banked_keys": (56, 288)}
+            positions = {"coins": (67, 126), "keys": (67, 156), "banked_keys": (67, 186)}
         elif minimized:
             positions = {"coins": (220, 58), "keys": (78, 58), "banked_keys": (150, 58)}
         else:
@@ -4265,19 +4265,26 @@ class TypeCast(tk.Tk):
             x, y = self.resource_delta_position(delta.resource, minimized)
             lane_index = lane_offsets.get(delta.resource, 0)
             lane_offsets[delta.resource] = lane_index + 1
-            y -= lane_index * 12 + int(progress * 10)
+            y -= lane_index * (10 if minimized == "vertical" else 12) + int(progress * 10)
             if delta.amount > 0 and delta.resource == "banked_keys":
                 color = "#2478d4"
             else:
                 color = "#118a45" if delta.amount > 0 else "#b32635"
             color = self.blend_hex_color(color, panel_fill, progress * 0.25)
-            text = f"{delta.amount:+,}"
-            text_width = max(26, len(text) * 6 + 12)
+            if minimized == "vertical":
+                sign = "+" if delta.amount > 0 else ""
+                text = f"{sign}{self.compact_number_text(delta.amount)}"
+                text_width = max(22, len(text) * 5 + 10)
+                font = self.overlay_font(7, "bold")
+            else:
+                text = f"{delta.amount:+,}"
+                text_width = max(26, len(text) * 6 + 12)
+                font = self.overlay_font(8, "bold")
             outline_color = "#102f32" if self.dark_theme else "#ffffff"
             canvas.create_rectangle(x - text_width // 2, y - 7, x + text_width // 2, y + 7, fill=panel_fill, outline=panel_outline)
             for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)):
-                canvas.create_text(x + ox, y + oy, text=text, anchor="center", fill=outline_color, font=self.overlay_font(8, "bold"))
-            canvas.create_text(x, y, text=text, anchor="center", fill=color, font=self.overlay_font(8, "bold"))
+                canvas.create_text(x + ox, y + oy, text=text, anchor="center", fill=outline_color, font=font)
+            canvas.create_text(x, y, text=text, anchor="center", fill=color, font=font)
         self.resource_deltas = active_deltas
 
     def compact_number_text(self, value):
@@ -4319,8 +4326,8 @@ class TypeCast(tk.Tk):
             title = "Casting..."
             status_line = f"Bite {max(left, 0):.1f}s"
 
-        if len(title) > 34:
-            title = f"{title[:31]}..."
+        if len(title) > 24:
+            title = f"{title[:21]}..."
 
         title_width = int((w - 20) * self.game_scale)
         canvas.create_text(panel_x0 + 9, panel_y0 + 30, text=title, anchor="nw", fill=panel_text_color, font=self.overlay_font(8, "bold"), width=title_width)
@@ -4336,7 +4343,7 @@ class TypeCast(tk.Tk):
         stat_width = int((w - 18) * self.game_scale)
         compact_stats = [
             f"C {self.compact_number_text(self.coins)}",
-            f"Fish {self.regular_inventory_count()}/{self.inventory_limit}",
+            f"F {self.regular_inventory_count()}/{self.inventory_limit}",
             f"CT {self.compact_number_text(self.banked_keys)}",
         ]
         if autosell_countdown:
