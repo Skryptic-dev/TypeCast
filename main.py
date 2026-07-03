@@ -234,6 +234,8 @@ TRANSPARENT_COLOR = "#ff00ff"
 KEYBOARD_KEYS = [vk for vk in range(8, 256) if vk not in (16, 17, 18, 91, 92, 93)]
 BASE_OVERLAY_WIDTH = 320
 MINIMIZED_OVERLAY_HEIGHT = 80
+MINIMIZED_VERTICAL_OVERLAY_WIDTH = 112
+MINIMIZED_VERTICAL_OVERLAY_HEIGHT = 320
 FULL_OVERLAY_HEIGHT = 236
 
 
@@ -948,6 +950,7 @@ class TypeCast(tk.Tk):
         self.menu_docked = True
         self.menu_docked_var = tk.BooleanVar(value=True)
         self.minimized = False
+        self.compact_vertical_var = tk.BooleanVar(value=False)
         self.rod_pull = 0.0
         self.fish_bubbles: List[FishBubble] = []
         self.last_player_activity_at = time.time()
@@ -1041,6 +1044,7 @@ class TypeCast(tk.Tk):
         self.debug_selected_collection = tk.StringVar(value="Common")
         self.debug_selected_relic = tk.StringVar(value=RELICS[0]["name"])
         self.debug_selected_potion = tk.StringVar(value=POTIONS[0]["name"])
+        self.debug_shop_prices_bypassed = tk.BooleanVar(value=False)
         self.active_menu_tab = "Inventory"
         self.menu_tab_frames = {}
         self.menu_tab_buttons = {}
@@ -1234,6 +1238,8 @@ class TypeCast(tk.Tk):
             ttk.Button(debug_resource_grid, text="+10000 Total Keys", command=lambda: self.debug_add_total_keys(10000)).grid(row=1, column=1, sticky="ew", padx=(0, 6))
             ttk.Button(debug_resource_grid, text="+1000 Cast Tokens", command=lambda: self.debug_add_banked_keys(1000)).grid(row=0, column=2, sticky="ew", pady=(0, 4))
             ttk.Button(debug_resource_grid, text="+10000 Cast Tokens", command=lambda: self.debug_add_banked_keys(10000)).grid(row=1, column=2, sticky="ew")
+
+            ttk.Checkbutton(debug_tab, text="Bypass Shop Prices", variable=self.debug_shop_prices_bypassed, command=self.on_debug_shop_prices_toggle, style="Content.TCheckbutton").pack(anchor="w", pady=(4, 0))
 
             ttk.Label(debug_tab, text="Actions").pack(anchor="w", pady=(8, 4))
             debug_action_row = ttk.Frame(debug_tab)
@@ -1561,6 +1567,7 @@ class TypeCast(tk.Tk):
         monitor_menu.bind("<<ComboboxSelected>>", self.on_monitor_selected)
         ttk.Checkbutton(settings_tab, text="Always on Top", variable=self.always_on_top_var, command=self.toggle_always_on_top, style="Content.TCheckbutton").pack(anchor="w", pady=(0, 6))
         ttk.Checkbutton(settings_tab, text="Attach Menu to Game Window", variable=self.menu_docked_var, command=self.on_menu_dock_setting_toggle, style="Content.TCheckbutton").pack(anchor="w", pady=(0, 6))
+        ttk.Checkbutton(settings_tab, text="Vertical Compact Mode", variable=self.compact_vertical_var, command=self.on_compact_vertical_toggle, style="Content.TCheckbutton").pack(anchor="w", pady=(0, 6))
         ttk.Checkbutton(settings_tab, text="Pin Game Info Panel", variable=self.game_info_panel_pinned, command=self.toggle_game_info_panel_pin, style="Content.TCheckbutton").pack(anchor="w", pady=(0, 6))
         if IS_WINDOWS:
             ttk.Checkbutton(settings_tab, text="Start with Windows", variable=self.start_with_windows_var, command=self.on_start_with_windows_toggle, style="Content.TCheckbutton").pack(anchor="w", pady=(0, 6))
@@ -2704,6 +2711,17 @@ class TypeCast(tk.Tk):
     def shop_price(self, price):
         return max(1, int(round(price * self.shop_cost_multiplier())))
 
+    def debug_shop_bypass_enabled(self):
+        return bool(self.debug_shop_prices_bypassed.get())
+
+    def on_debug_shop_prices_toggle(self):
+        self.last_message = "Debug: shop prices bypassed." if self.debug_shop_bypass_enabled() else "Debug: shop prices restored."
+        self.refresh_all()
+        self.save()
+
+    def should_pay_shop_cost(self):
+        return not self.debug_shop_bypass_enabled()
+
     def buy_equipment_upgrade(self):
         index = self.shop_list.curselection()
         if not index:
@@ -2713,13 +2731,16 @@ class TypeCast(tk.Tk):
             return
         slot, item = upgrades[index[0]]
         price = self.shop_price(item["price"])
-        if self.coins < price:
+        if self.should_pay_shop_cost() and self.coins < price:
             self.last_message = "Not enough coins."
             self.refresh_all()
             return
-        self.change_coins(-price)
+        if self.should_pay_shop_cost():
+            self.change_coins(-price)
         self.equipment_levels[slot] += 1
         self.last_message = f"Upgraded {slot.title()} to {item['name']} for {price} coins."
+        if self.debug_shop_bypass_enabled():
+            self.last_message += " (debug bypass)"
         self.refresh_all()
 
     def buy_backpack_upgrade(self):
@@ -2729,14 +2750,17 @@ class TypeCast(tk.Tk):
             self.refresh_all()
             return
         price = self.shop_price(upgrade["price"])
-        if self.coins < price:
+        if self.should_pay_shop_cost() and self.coins < price:
             self.last_message = "Not enough coins."
             self.refresh_all()
             return
-        self.change_coins(-price)
+        if self.should_pay_shop_cost():
+            self.change_coins(-price)
         self.backpack_level = upgrade["level"]
         self.inventory_limit = self.current_inventory_limit()
         self.last_message = f"Backpack upgraded to {upgrade['slots']} slots for {price} coins."
+        if self.debug_shop_bypass_enabled():
+            self.last_message += " (debug bypass)"
         self.refresh_all()
 
     def next_banked_upgrade(self):
@@ -2755,13 +2779,16 @@ class TypeCast(tk.Tk):
             self.last_message = "Cast Token upgrades are already maxed."
             self.refresh_all()
             return
-        if self.banked_keys < upgrade["cost"]:
+        if self.should_pay_shop_cost() and self.banked_keys < upgrade["cost"]:
             self.last_message = f"Need {upgrade['cost']} Cast Tokens for {upgrade['name']}."
             self.refresh_all()
             return
-        self.change_banked_keys(-upgrade["cost"])
+        if self.should_pay_shop_cost():
+            self.change_banked_keys(-upgrade["cost"])
         self.banked_upgrade_level += 1
         self.last_message = f"Purchased {upgrade['name']} (+{int((upgrade['mult'] - 1) * 100)}% progress)."
+        if self.debug_shop_bypass_enabled():
+            self.last_message += " (debug bypass)"
         self.refresh_all()
 
     def next_autosell_upgrade(self):
@@ -2776,14 +2803,17 @@ class TypeCast(tk.Tk):
             self.refresh_all()
             return
         price = self.shop_price(upgrade["price"])
-        if self.coins < price:
+        if self.should_pay_shop_cost() and self.coins < price:
             self.last_message = "Not enough coins."
             self.refresh_all()
             return
-        self.change_coins(-price)
+        if self.should_pay_shop_cost():
+            self.change_coins(-price)
         self.autosell_level += 1
         self.last_autosell_at = time.time()
         self.last_message = f"Purchased {upgrade['name']} ({upgrade['percent']}% auto-sell)."
+        if self.debug_shop_bypass_enabled():
+            self.last_message += " (debug bypass)"
         self.refresh_all()
 
     def selected_fishing_spot_index(self):
@@ -2820,8 +2850,12 @@ class TypeCast(tk.Tk):
         if cost_type == "free":
             return True
         if cost_type == "coins":
+            if self.debug_shop_bypass_enabled():
+                return True
             return self.coins >= spot["cost"]
         if cost_type == "banked_keys":
+            if self.debug_shop_bypass_enabled():
+                return True
             return self.banked_keys >= spot["cost"]
         if cost_type == "collection":
             return self.collection_discovered_count() >= spot["cost"]
@@ -2838,6 +2872,8 @@ class TypeCast(tk.Tk):
         ]
 
     def pay_fishing_spot_cost(self, spot):
+        if not self.should_pay_shop_cost():
+            return
         if spot["cost_type"] == "coins":
             self.change_coins(-spot["cost"])
         elif spot["cost_type"] == "banked_keys":
@@ -2859,6 +2895,8 @@ class TypeCast(tk.Tk):
         self.unlocked_fishing_spots.add(spot["id"])
         self.selected_fishing_spot = spot["id"]
         self.last_message = f"Unlocked {spot['name']}."
+        if self.debug_shop_bypass_enabled():
+            self.last_message += " (debug bypass)"
         self.refresh_all()
 
     def select_fishing_spot(self):
@@ -3086,8 +3124,18 @@ class TypeCast(tk.Tk):
         return max(work_left, min(x, max_x)), max(work_top, min(y, max_y))
 
     def overlay_size(self):
-        height = MINIMIZED_OVERLAY_HEIGHT if self.minimized else FULL_OVERLAY_HEIGHT
-        return int(round(BASE_OVERLAY_WIDTH * self.game_scale)), int(round(height * self.game_scale))
+        width, height = self.base_overlay_size()
+        return int(round(width * self.game_scale)), int(round(height * self.game_scale))
+
+    def compact_vertical_enabled(self):
+        return self.minimized and bool(self.compact_vertical_var.get())
+
+    def base_overlay_size(self):
+        if self.compact_vertical_enabled():
+            return MINIMIZED_VERTICAL_OVERLAY_WIDTH, MINIMIZED_VERTICAL_OVERLAY_HEIGHT
+        if self.minimized:
+            return BASE_OVERLAY_WIDTH, MINIMIZED_OVERLAY_HEIGHT
+        return BASE_OVERLAY_WIDTH, FULL_OVERLAY_HEIGHT
 
     def overlay_font(self, size, weight="normal"):
         scaled_size = max(1, int(round(size * self.game_scale)))
@@ -3668,6 +3716,13 @@ class TypeCast(tk.Tk):
         self.schedule_always_on_top_reasserts()
         self.save()
 
+    def on_compact_vertical_toggle(self):
+        if self.minimized:
+            self.set_window_state(True)
+        else:
+            self.draw_overlay()
+        self.save()
+
     def game_info_panel_bounds(self):
         return (18, 174, 302, 228)
 
@@ -4187,7 +4242,9 @@ class TypeCast(tk.Tk):
                 canvas.scale(item, BASE_OVERLAY_WIDTH / 2, 0, -1, 1)
 
     def resource_delta_position(self, resource, minimized):
-        if minimized:
+        if minimized == "vertical":
+            positions = {"coins": (56, 252), "keys": (56, 270), "banked_keys": (56, 288)}
+        elif minimized:
             positions = {"coins": (220, 58), "keys": (78, 58), "banked_keys": (150, 58)}
         else:
             positions = {"coins": (58, 143), "keys": (130, 143), "banked_keys": (206, 143)}
@@ -4222,6 +4279,72 @@ class TypeCast(tk.Tk):
                 canvas.create_text(x + ox, y + oy, text=text, anchor="center", fill=outline_color, font=self.overlay_font(8, "bold"))
             canvas.create_text(x, y, text=text, anchor="center", fill=color, font=self.overlay_font(8, "bold"))
         self.resource_deltas = active_deltas
+
+    def compact_number_text(self, value):
+        value = int(value)
+        abs_value = abs(value)
+        if abs_value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.1f}B"
+        if abs_value >= 1_000_000:
+            return f"{value / 1_000_000:.1f}M"
+        if abs_value >= 10_000:
+            return f"{value / 1_000:.1f}K"
+        return str(value)
+
+    def draw_vertical_compact_overlay(self, canvas, w, h, text_panel_fill, text_panel_outline, panel_text_color, panel_subtext_color, progress_bg, menu_fill, menu_outline, autosell_countdown):
+        panel_x0, panel_y0 = 8, 8
+        panel_x1, panel_y1 = w - 8, h - 8
+        self.draw_panel_shadow(canvas, panel_x0, panel_y0, panel_x1, panel_y1, text_panel_fill)
+        canvas.create_rectangle(panel_x0, panel_y0, panel_x1, panel_y1, fill=text_panel_fill, outline=text_panel_outline)
+
+        menu_size = 16
+        menu_x0 = panel_x1 - menu_size - 7
+        menu_y0 = panel_y0 + 7
+        menu_x1 = menu_x0 + menu_size
+        menu_y1 = menu_y0 + menu_size
+        canvas.create_rectangle(menu_x0, menu_y0, menu_x1, menu_y1, fill=menu_fill, outline=menu_outline, tags=("menu",))
+        for y in (menu_y0 + 4, menu_y0 + 8, menu_y0 + 12):
+            canvas.create_line(menu_x0 + 4, y, menu_x1 - 4, y, fill=panel_text_color, width=2, tags=("menu",))
+
+        if self.hooked_fish:
+            fish = self.hooked_fish
+            progress = fish.progress / fish.strokes
+            title = hooked_fish_display_name(fish)
+            status_line = f"{self.format_progress_value(fish.progress)}/{fish.strokes}"
+        else:
+            left = self.auto_cast_seconds() - (time.time() - self.cast_started_at)
+            self.last_message = f"Casting... {max(left, 0):.1f}s"
+            self.status_text.set(self.last_message)
+            progress = max(0.0, min(1.0, 1 - max(left, 0) / self.auto_cast_seconds()))
+            title = "Casting..."
+            status_line = f"Bite {max(left, 0):.1f}s"
+
+        if len(title) > 34:
+            title = f"{title[:31]}..."
+
+        title_width = int((w - 20) * self.game_scale)
+        canvas.create_text(panel_x0 + 9, panel_y0 + 30, text=title, anchor="nw", fill=panel_text_color, font=self.overlay_font(8, "bold"), width=title_width)
+        canvas.create_text(w // 2, panel_y0 + 76, text=status_line, anchor="center", fill=panel_subtext_color, font=self.overlay_font(8, "bold"), width=title_width)
+
+        bar_x0, bar_y0 = w // 2 - 11, 96
+        bar_x1, bar_y1 = w // 2 + 11, h - 88
+        canvas.create_rectangle(bar_x0, bar_y0, bar_x1, bar_y1, fill=progress_bg, outline=menu_outline)
+        fill_y0 = bar_y1 - int((bar_y1 - bar_y0) * progress)
+        canvas.create_rectangle(bar_x0, fill_y0, bar_x1, bar_y1, fill="#4aa7a1", outline="")
+
+        stat_y = h - 76
+        stat_width = int((w - 18) * self.game_scale)
+        compact_stats = [
+            f"C {self.compact_number_text(self.coins)}",
+            f"Fish {self.regular_inventory_count()}/{self.inventory_limit}",
+            f"CT {self.compact_number_text(self.banked_keys)}",
+        ]
+        if autosell_countdown:
+            compact_stats.append(f"AS {autosell_countdown}")
+        for index, line in enumerate(compact_stats[:4]):
+            canvas.create_text(w // 2, stat_y + index * 14, text=line, anchor="center", fill=panel_subtext_color, font=self.overlay_font(7), width=stat_width)
+
+        self.draw_resource_deltas(canvas, text_panel_fill, text_panel_outline, minimized="vertical")
 
     def draw_hooked_fish_asset(self, canvas, fish, fish_x):
         if fish.kind == "chest":
@@ -4262,8 +4385,7 @@ class TypeCast(tk.Tk):
     def draw_overlay(self):
         canvas = self.overlay
         canvas.delete("all")
-        w = BASE_OVERLAY_WIDTH
-        h = FULL_OVERLAY_HEIGHT
+        w, h = self.base_overlay_size()
 
         if self.dark_theme:
             main_fill = "#2b2f3b"
@@ -4299,6 +4421,23 @@ class TypeCast(tk.Tk):
         panel_subtext_color = palette["sub_fg"]
         autosell_countdown = self.autosell_countdown_text_value()
         spot_style = self.fishing_spot_scene_style()
+
+        if self.compact_vertical_enabled():
+            self.draw_vertical_compact_overlay(
+                canvas,
+                w,
+                h,
+                text_panel_fill,
+                text_panel_outline,
+                panel_text_color,
+                panel_subtext_color,
+                progress_bg,
+                menu_fill,
+                menu_outline,
+                autosell_countdown,
+            )
+            self.scale_overlay_items()
+            return
 
         if self.minimized:
             panel_x0, panel_y0 = 14, 12
@@ -4786,12 +4925,10 @@ class TypeCast(tk.Tk):
         y = self.winfo_y()
         self.window_x = x
         self.window_y = y
-        height = MINIMIZED_OVERLAY_HEIGHT if minimized else FULL_OVERLAY_HEIGHT
-        width = int(round(BASE_OVERLAY_WIDTH * self.game_scale))
-        scaled_height = int(round(height * self.game_scale))
-        self.window_x, self.window_y = self.clamp_overlay_position(x, y, width, scaled_height)
-        self.geometry(f"{width}x{scaled_height}+{self.window_x}+{self.window_y}")
-        self.overlay.config(width=width, height=scaled_height)
+        width, height = self.overlay_size()
+        self.window_x, self.window_y = self.clamp_overlay_position(x, y, width, height)
+        self.geometry(f"{width}x{height}+{self.window_x}+{self.window_y}")
+        self.overlay.config(width=width, height=height)
         self.position_menu()
         self.draw_overlay()
 
@@ -5399,6 +5536,8 @@ class TypeCast(tk.Tk):
         self.always_on_top_var.set(self.always_on_top)
         self.apply_always_on_top()
         self.game_info_panel_pinned.set(bool(data.get("game_info_panel_pinned", False)))
+        self.compact_vertical_var.set(bool(data.get("compact_vertical_mode", False)))
+        self.debug_shop_prices_bypassed.set(bool(data.get("debug_shop_prices_bypassed", False)))
         self.game_info_panel_visible = True
         self.last_info_panel_hover_at = time.time()
         self.menu_offset_x = int(data.get("menu_offset_x", self.menu_offset_x))
@@ -5482,6 +5621,8 @@ class TypeCast(tk.Tk):
             "menu_scale": self.menu_scale,
             "always_on_top": self.always_on_top,
             "game_info_panel_pinned": self.game_info_panel_pinned.get(),
+            "compact_vertical_mode": self.compact_vertical_var.get(),
+            "debug_shop_prices_bypassed": self.debug_shop_prices_bypassed.get(),
             "menu_offset_x": self.menu_offset_x,
             "menu_offset_y": self.menu_offset_y,
             "window_x": self.winfo_x(),
