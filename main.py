@@ -2,6 +2,7 @@ import ctypes
 import json
 import os
 import random
+import shutil
 import struct
 import subprocess
 import sys
@@ -10,7 +11,7 @@ import tkinter as tk
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
-from typing import List
+from typing import List, Optional, Union
 
 try:
     import winreg
@@ -28,6 +29,7 @@ EMBEDDED_DISCORD_CLIENT_ID = "1509267518274146335"
 STARTUP_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 IS_WINDOWS = sys.platform.startswith("win")
 ACTIVE_DESKTOP_MODE = not IS_WINDOWS
+OS_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 THEME_NAMES = (
     "Light",
     "Dark",
@@ -125,9 +127,11 @@ def unique_paths(paths):
 
 
 def legacy_save_candidates():
-    paths = [user_data_file("save.json")]
+    paths = [SAVE_BACKUP_FILE, SAVE_PREVIOUS_FILE, user_data_file("save.json")]
     for directory in app_search_paths():
         paths.append(directory / "typecast_save.json")
+        paths.append(directory / "typecast_save.backup.json")
+        paths.append(directory / "typecast_save.previous.json")
         paths.append(directory / "save.json")
     return [path for path in unique_paths(paths) if path != SAVE_FILE]
 
@@ -203,6 +207,8 @@ def migrate_save_to_user_data(source_path, data):
 
 
 SAVE_FILE = user_data_file("typecast_save.json")
+SAVE_BACKUP_FILE = user_data_file("typecast_save.backup.json")
+SAVE_PREVIOUS_FILE = user_data_file("typecast_save.previous.json")
 CONFIG_FILE = find_app_file("typecast_config.json")
 ICON_FILE = find_app_file("typecast.png")
 ASSET_DIR = find_app_file("assets")
@@ -210,7 +216,8 @@ TICK_MS = 120
 KEY_POLL_MS = 35
 DISCORD_UPDATE_MS = 15000
 ALWAYS_ON_TOP_REASSERT_DELAYS_MS = (100, 1000, 3000, 8000, 15000, 30000)
-AUTOSAVE_SECONDS = 10
+AUTOSAVE_SECONDS = 5
+DIRTY_SAVE_DELAY_MS = 1200
 AUTO_CAST_SECONDS = 2.5
 AUTOSELL_SECONDS = 180
 INFO_PANEL_HIDE_SECONDS = 4.0
@@ -277,7 +284,7 @@ class LinuxEvdevKeyPoller:
     def __init__(self, device_path):
         self.device_path = str(device_path)
         print(f"[TypeCast input] Trying Linux evdev keyboard device: {self.device_path}", flush=True)
-        self.fd = os.open(self.device_path, os.O_RDONLY | os.O_NONBLOCK)
+        self.fd = os.open(self.device_path, os.O_RDONLY | OS_O_NONBLOCK)
         self.pressed = set()
         self.events_seen = 0
         self.last_error = ""
@@ -285,6 +292,8 @@ class LinuxEvdevKeyPoller:
         print(f"[TypeCast input] Opened Linux evdev keyboard device: {self.device_path}", flush=True)
 
     def current_keys(self):
+        if self.fd is None:
+            return set(self.pressed)
         while True:
             try:
                 data = os.read(self.fd, self.EVENT_SIZE * 64)
@@ -427,11 +436,13 @@ FISH_VARIANTS = [
     {"rarity": "Rare", "stroke_mult": 1.45, "value_mult": 2.2, "weight_mult": 0.16},
     {"rarity": "Epic", "stroke_mult": 2.1, "value_mult": 5.0, "weight_mult": 0.055},
 ]
-SPARKLE_FISH_RARITIES = {"Epic", "Secret", "Ultra Rare"}
+SPARKLE_FISH_RARITIES = {"Rare", "Epic", "Secret", "Ultra Rare"}
 SPARKLE_RARITY_COLORS = {
+    "Rare": "#9bd3ff",
     "Epic": "#e7b8ff",
     "Secret": "#d8f6ff",
     "Ultra Rare": "#fff0a6",
+    "Eternal": "#ffffff",
 }
 PRIDE_SKIN_CHANCE = 0.08
 HAPPY_FISH_COLLECTION = "Happy Fish"
@@ -481,6 +492,191 @@ def build_fish_table():
 
 FISH_TABLE = build_fish_table()
 
+OCEAN_ENTRY_LIFETIME_KEYS = 250000
+OCEAN_ENTRY_CAST_UPGRADE_LEVEL = 3
+OCEAN_SHOP_ROTATION_CATCHES = 25
+OCEAN_TOKEN_CONVERSION_COST = 1000
+OCEAN_TOKEN_CONVERSION_GAIN = 10
+OCEAN_EARLY_DEPTHS = [0, 10, 25, 50, 100]
+OCEAN_DEPTH_NAMES = {
+    0: "Surface",
+    10: "10 m - Sunlit Shelf",
+    25: "25 m - Kelp Forest",
+    50: "50 m - Blue Expanse",
+    100: "100 m - Twilight Gate",
+    150: "150 m - Dimming Blue",
+    200: "200 m - Gloaming Reach",
+    250: "250 m - Last Sunbeam",
+    300: "300 m - Lantern Drift",
+    350: "350 m - Sapphire Dusk",
+    400: "400 m - Falling Night",
+    450: "450 m - Twilight Verge",
+    500: "500 m - Midnight Threshold",
+    600: "600 m - Starlost Current",
+    700: "700 m - Velvet Deep",
+    800: "800 m - Blackwater Passage",
+    900: "900 m - Abyssal Approach",
+    1000: "1,000 m - Midnight Zone",
+}
+OCEAN_DEPTH_COSTS = {0: 0, 10: 40, 25: 110, 50: 260, 100: 600}
+
+OCEAN_CREATURES = [
+    {"name": "Foamfin Sardine", "min_depth": 0, "max_depth": 25, "strokes": 900, "value": 1800, "tokens": 3, "weight": 34, "color": "#a8e6ff"},
+    {"name": "Sunray Mackerel", "min_depth": 0, "max_depth": 50, "strokes": 1150, "value": 2400, "tokens": 4, "weight": 25, "color": "#78c9ed"},
+    {"name": "Sailcloth Flyingfish", "min_depth": 0, "max_depth": 100, "strokes": 1450, "value": 3300, "tokens": 5, "weight": 17, "color": "#d7f4ff"},
+    {"name": "Ribbon Kelp Bass", "min_depth": 10, "max_depth": 100, "strokes": 1750, "value": 4400, "tokens": 7, "weight": 22, "color": "#55b58a"},
+    {"name": "Emerald Seahorse", "min_depth": 10, "max_depth": 200, "strokes": 2200, "value": 6100, "tokens": 9, "weight": 12, "color": "#70d6a2"},
+    {"name": "Blueglass Squid", "min_depth": 25, "max_depth": 300, "strokes": 2700, "value": 8200, "tokens": 12, "weight": 15, "color": "#84d8ff"},
+    {"name": "Silver Current Tuna", "min_depth": 25, "max_depth": 500, "strokes": 3300, "value": 11000, "tokens": 15, "weight": 11, "color": "#a9bed2"},
+    {"name": "Dusklight Lanternfish", "min_depth": 50, "max_depth": 1000, "strokes": 4100, "value": 15000, "tokens": 20, "weight": 9, "color": "#77f1df"},
+    {"name": "Violet Comb Jelly", "min_depth": 50, "max_depth": 2000, "strokes": 5000, "value": 21000, "tokens": 26, "weight": 6, "color": "#c093ff"},
+    {"name": "Twilight Oarfish", "min_depth": 100, "max_depth": 4000, "strokes": 6200, "value": 30000, "tokens": 35, "weight": 5, "color": "#9ca9ff"},
+    {"name": "Midnight Fangtooth", "min_depth": 250, "max_depth": 6000, "strokes": 7800, "value": 44000, "tokens": 48, "weight": 4, "color": "#536070"},
+    {"name": "Abyssal Dumbo Octopus", "min_depth": 500, "max_depth": 10000, "strokes": 9600, "value": 65000, "tokens": 65, "weight": 3, "color": "#d28ecf"},
+    {"name": "Hadal Snailfish", "min_depth": 1000, "max_depth": None, "strokes": 12500, "value": 95000, "tokens": 90, "weight": 2.2, "color": "#e9d7ff"},
+    {"name": "Endless Trench Serpent", "min_depth": 2500, "max_depth": None, "strokes": 18000, "value": 160000, "tokens": 140, "weight": 0.8, "color": "#5b73a8"},
+    {"name": "Firstlight Leviathan", "min_depth": 100, "max_depth": None, "strokes": 24000, "value": 300000, "tokens": 250, "weight": 0.035, "color": "#fff0a6", "rarity": "Eternal"},
+    {"name": "The Unfathomed", "min_depth": 1000, "max_depth": None, "strokes": 40000, "value": 650000, "tokens": 500, "weight": 0.012, "color": "#b36dff", "rarity": "Eternal"},
+    {"name": "Ocean Without End", "min_depth": 10000, "max_depth": None, "strokes": 75000, "value": 1500000, "tokens": 1000, "weight": 0.003, "color": "#ffffff", "rarity": "Eternal"},
+]
+
+# Large authored species roster. Regular creatures receive the four standard
+# Ocean rarity entries; Eternal creatures retain their single exclusive entry.
+OCEAN_EXPANSION_ZONES = [
+    {
+        "min_depth": 0,
+        "max_depth": 50,
+        "color": "#8edcf2",
+        "names": [
+            "Saltfoam Anchovy", "Pearlstripe Herring", "Sunscale Pompano", "Tidepool Blenny",
+            "Coral Dartfish", "Azure Needlefish", "Seagrass Pipefish", "Honeyfin Chromis",
+            "Skylight Wrasse", "Lagoon Butterflyfish", "Whitecap Bonito", "Sapphire Halfbeak",
+        ],
+    },
+    {
+        "min_depth": 25,
+        "max_depth": 150,
+        "color": "#50bfa5",
+        "names": [
+            "Kelpveil Rockfish", "Ribbonleaf Grouper", "Emerald Surgeonfish", "Forest Canopy Ray",
+            "Anemone Cardinalfish", "Verdant Trumpetfish", "Copper Kelp Crab", "Garden Reef Lobster",
+            "Moonpetal Angelfish", "Reedtail Barracuda", "Marble Parrotfish", "Seafern Dragonet",
+        ],
+    },
+    {
+        "min_depth": 100,
+        "max_depth": 1000,
+        "color": "#6d83d6",
+        "names": [
+            "Twilight Hatchetfish", "Indigo Bristlemouth", "Violet Telescopefish", "Duskwater Cusk",
+            "Starspot Lanternshark", "Blue Ember Jelly", "Gloamfin Escolar", "Evening Ribbon Eel",
+            "Comet Siphonophore", "Shadowglass Shrimp", "Nocturne Opah", "Crescent Sabertooth",
+        ],
+    },
+    {
+        "min_depth": 750,
+        "max_depth": 4000,
+        "color": "#394f75",
+        "names": [
+            "Midnight Dragonfish", "Blackwater Viperfish", "Phantom Gulper Eel", "Inkveil Chimaera",
+            "Obsidian Barreleye", "Nightbell Jellyfish", "Voidfin Grenadier", "Spectral Sea Spider",
+            "Coalstripe Codling", "Gravewater Isopod", "Dreadnought Amphipod", "Eclipse Squid",
+        ],
+    },
+    {
+        "min_depth": 3500,
+        "max_depth": 6500,
+        "color": "#293646",
+        "names": [
+            "Abyssal Tripodfish", "Bonewhite Cusk Eel", "Pressure Ghost Shark", "Trenchwalker Crab",
+            "Pale Rift Octopus", "Abyss Bloom Jelly", "Ironjaw Brotula", "Silent Sea Cucumber",
+            "Riftglass Snail", "Deep Crown Medusa", "Ashen Lizardfish", "Abyss Anchorfish",
+        ],
+    },
+    {
+        "min_depth": 6000,
+        "max_depth": None,
+        "color": "#6c6185",
+        "names": [
+            "Hadal Cusk", "Trench Snailfish", "Fissure Amphipod", "Mantle Plume Worm",
+            "Challenger Sea Star", "Faultline Eel", "Crushdepth Isopod", "Hadal Glass Sponge",
+            "Subduction Serpent",
+        ],
+    },
+]
+
+
+def build_ocean_expansion_creatures():
+    creatures = []
+    species_index = 0
+    for zone_index, zone in enumerate(OCEAN_EXPANSION_ZONES):
+        for local_index, name in enumerate(zone["names"]):
+            species_index += 1
+            depth = zone["min_depth"]
+            depth_scale = 1.0 + (max(0, depth) / 900)
+            creatures.append(
+                {
+                    "name": name,
+                    "min_depth": depth,
+                    "max_depth": zone["max_depth"],
+                    "strokes": round((1050 + species_index * 115 + local_index * 45) * depth_scale),
+                    "value": round((2100 + species_index * 620) * (1.0 + depth / 1400)),
+                    "tokens": max(3, round(3 + species_index * 0.9 + depth / 95)),
+                    "weight": max(0.45, 28 - local_index * 1.65 - zone_index * 2.7),
+                    "color": zone["color"],
+                }
+            )
+    creatures.extend(
+        [
+            {"name": "The Last Sunbeam", "min_depth": 250, "max_depth": None, "strokes": 29000, "value": 380000, "tokens": 310, "weight": 0.028, "color": "#fff5b5", "rarity": "Eternal"},
+            {"name": "Midnight Everlasting", "min_depth": 2500, "max_depth": None, "strokes": 48000, "value": 820000, "tokens": 620, "weight": 0.009, "color": "#8796ff", "rarity": "Eternal"},
+            {"name": "Heart of the Abyss", "min_depth": 5000, "max_depth": None, "strokes": 62000, "value": 1200000, "tokens": 850, "weight": 0.006, "color": "#ff8bd8", "rarity": "Eternal"},
+            {"name": "The Trench Remembers", "min_depth": 7500, "max_depth": None, "strokes": 85000, "value": 1900000, "tokens": 1300, "weight": 0.0025, "color": "#b7a3ff", "rarity": "Eternal"},
+            {"name": "Infinity Below", "min_depth": 15000, "max_depth": None, "strokes": 120000, "value": 3200000, "tokens": 2200, "weight": 0.0012, "color": "#f7ffff", "rarity": "Eternal"},
+        ]
+    )
+    return creatures
+
+
+OCEAN_CREATURES.extend(build_ocean_expansion_creatures())
+
+OCEAN_EQUIPMENT_SLOTS = ("vessel", "sonar", "suit", "lure", "charm")
+OCEAN_EQUIPMENT_ITEMS = [
+    {"id": "drift_skiff", "slot": "vessel", "name": "Drift Skiff", "cost": 80, "effect": "8% fewer keys for Ocean and Pond catches", "stroke_mult": 0.92},
+    {"id": "current_cutter", "slot": "vessel", "name": "Current Cutter", "cost": 260, "effect": "15% fewer keys for Ocean and Pond catches", "stroke_mult": 0.85},
+    {"id": "abyssal_sub", "slot": "vessel", "name": "Abyssal Submersible", "cost": 900, "effect": "24% fewer keys for Ocean and Pond catches", "stroke_mult": 0.76},
+    {"id": "survey_sonar", "slot": "sonar", "name": "Survey Sonar", "cost": 100, "effect": "Improves uncommon and rare encounters in both regions", "rare_bonus": 1.25, "pond_luck": 1},
+    {"id": "discovery_array", "slot": "sonar", "name": "Discovery Array", "cost": 340, "effect": "Strongly improves rare encounters in both regions", "rare_bonus": 1.65, "pond_luck": 3},
+    {"id": "eternal_echo", "slot": "sonar", "name": "Eternal Echo", "cost": 1400, "effect": "Doubles Eternal weight and grants +4 Pond luck", "eternal_bonus": 2.0, "pond_luck": 4},
+    {"id": "pressure_weave", "slot": "suit", "name": "Pressure Weave", "cost": 120, "effect": "+15% deep Depth Tokens and +5% catch value everywhere", "deep_token_mult": 1.15, "catch_value_mult": 1.05},
+    {"id": "trench_plate", "slot": "suit", "name": "Trench Plate", "cost": 420, "effect": "+35% deep Depth Tokens and +10% catch value everywhere", "deep_token_mult": 1.35, "catch_value_mult": 1.10},
+    {"id": "hadal_shell", "slot": "suit", "name": "Hadal Shell", "cost": 1600, "effect": "+60% deep Depth Tokens and +18% catch value everywhere", "deep_token_mult": 1.60, "catch_value_mult": 1.18},
+    {"id": "collector_lure", "slot": "lure", "name": "Collector's Lure", "cost": 150, "effect": "+10% Depth Tokens and +2% extra Cast Token chance", "token_mult": 1.10, "pond_banked_bonus": 0.02},
+    {"id": "pearlflare_lure", "slot": "lure", "name": "Pearlflare Lure", "cost": 500, "effect": "+25% Depth Tokens and +4% extra Cast Token chance", "token_mult": 1.25, "pond_banked_bonus": 0.04},
+    {"id": "endless_lure", "slot": "lure", "name": "Endless Lure", "cost": 1800, "effect": "+50% Depth Tokens and +7% extra Cast Token chance", "token_mult": 1.50, "pond_banked_bonus": 0.07},
+    {"id": "wake_runner", "slot": "vessel", "name": "Wake Runner", "cost": 520, "effect": "18% fewer keys for Ocean and Pond catches", "stroke_mult": 0.82},
+    {"id": "archive_sonar", "slot": "sonar", "name": "Archive Sonar", "cost": 620, "effect": "Improves rare and Eternal encounters and grants +4 Pond luck", "rare_bonus": 1.8, "eternal_bonus": 1.35, "pond_luck": 4},
+    {"id": "token_diver", "slot": "suit", "name": "Token Diver Rig", "cost": 700, "effect": "+45% deep Depth Tokens and +13% catch value everywhere", "deep_token_mult": 1.45, "catch_value_mult": 1.13},
+    {"id": "kraken_lure", "slot": "lure", "name": "Kraken Lure", "cost": 850, "effect": "+35% Depth Tokens and +5% extra Cast Token chance", "token_mult": 1.35, "pond_banked_bonus": 0.05},
+    {"id": "barnacle_talisman", "slot": "charm", "name": "Barnacle Talisman", "cost": 180, "effect": "+3% relic chance from treasure chests everywhere", "relic_chance_bonus": 0.03},
+    {"id": "salvagers_compass", "slot": "charm", "name": "Salvager's Compass", "cost": 480, "effect": "+7% relic chance from treasure chests everywhere", "relic_chance_bonus": 0.07},
+    {"id": "sunken_idol", "slot": "charm", "name": "Sunken Idol", "cost": 1100, "effect": "+12% relic chance from treasure chests everywhere", "relic_chance_bonus": 0.12},
+    {"id": "treasure_singularity", "slot": "charm", "name": "Treasure Singularity", "cost": 2600, "effect": "+20% relic chance from treasure chests everywhere", "relic_chance_bonus": 0.20},
+]
+OCEAN_EQUIPMENT_BY_ID = {item["id"]: item for item in OCEAN_EQUIPMENT_ITEMS}
+
+
+def ocean_collection_entries():
+    entries = []
+    for creature in OCEAN_CREATURES:
+        rarities = ("Eternal",) if creature.get("rarity") == "Eternal" else ("Common", "Uncommon", "Rare", "Epic")
+        for rarity in rarities:
+            entries.append({"name": creature["name"], "rarity": rarity, "min_depth": creature["min_depth"]})
+    return entries
+
+
+OCEAN_COLLECTION = ocean_collection_entries()
+
 
 def fish_display_name(fish):
     return f"{fish['rarity']} {fish['name']}"
@@ -491,7 +687,8 @@ def hooked_fish_display_name(fish):
         return fish.name
     if getattr(fish, "kind", "fish") == "blessing":
         return fish.name
-    return f"{fish.rarity} {fish.name}"
+    gilded = "Gilded " if getattr(fish, "gilded", False) else ""
+    return f"{gilded}{fish.rarity} {fish.name}"
 
 
 def fish_inventory_display_name(fish):
@@ -501,7 +698,8 @@ def fish_inventory_display_name(fish):
         slot = fish.get("blessing_slot", "") if isinstance(fish, dict) else ""
         bonus = fish.get("blessing_bonus", 0) if isinstance(fish, dict) else 0
         return f"Stored Blessing: {name} ({blessing_effect_label(slot, bonus)})"
-    return f"{rarity} {name}"
+    gilded = "Gilded " if isinstance(fish, dict) and fish.get("gilded") else ""
+    return f"{gilded}{rarity} {name}"
 
 
 def asset_slug(value):
@@ -712,12 +910,12 @@ RELICS = [
 ]
 
 POTIONS = [
-    {"id": "typing_tonic", "name": "Typing Tonic", "rarity": "Common", "keys": 25, "weight": 70},
-    {"id": "coin_draught", "name": "Coin Draught", "rarity": "Common", "coins": 25, "weight": 70},
-    {"id": "storm_phial", "name": "Storm Phial", "rarity": "Rare", "keys": 90, "weight": 24},
-    {"id": "gilded_vial", "name": "Gilded Vial", "rarity": "Rare", "coins": 90, "weight": 24},
-    {"id": "deep_current_elixir", "name": "Deep Current Elixir", "rarity": "Secret", "keys": 220, "weight": 3},
-    {"id": "sunken_gold_elixir", "name": "Sunken Gold Elixir", "rarity": "Secret", "coins": 220, "weight": 3},
+    {"id": "typing_tonic", "name": "Typing Tonic", "rarity": "Common", "weight": 70, "duration_type": "keystrokes", "charges": 3000, "effect": "Build a typing streak for up to +50% catch progress"},
+    {"id": "coin_draught", "name": "Coin Draught", "rarity": "Common", "weight": 70, "duration_type": "catches", "charges": 15, "effect": "New catches are worth 50% more coins", "value_mult": 1.50},
+    {"id": "storm_phial", "name": "Storm Phial", "rarity": "Rare", "weight": 24, "duration_type": "keystrokes", "charges": 2500, "effect": "Every 50 typed keys triggers a 75-progress lightning surge", "surge_every": 50, "surge_progress": 75},
+    {"id": "gilded_vial", "name": "Gilded Vial", "rarity": "Rare", "weight": 24, "duration_type": "catches", "charges": 15, "effect": "25% chance for a 5x-value Gilded catch", "gilded_chance": 0.25, "gilded_value_mult": 5.0, "gilded_token_mult": 2.0},
+    {"id": "deep_current_elixir", "name": "Deep Current Elixir", "rarity": "Secret", "weight": 3, "duration_type": "catches", "charges": 12, "effect": "Undiscovered valid creatures receive 6x encounter weight", "missing_weight_mult": 6.0},
+    {"id": "sunken_gold_elixir", "name": "Sunken Gold Elixir", "rarity": "Secret", "weight": 3, "duration_type": "casts", "charges": 10, "effect": "More treasure chests with easier opening and doubled base rewards", "chest_chance_bonus": 0.12, "chest_stroke_mult": 0.60, "chest_reward_mult": 2.0},
 ]
 
 BLESSING_VISITORS = [
@@ -809,7 +1007,51 @@ ACHIEVEMENTS = [
     {"id": "equipment_all_10", "name": "Masterwork Kit", "description": "Upgrade all equipment slots to level 10."},
     {"id": "equipment_all_max", "name": "Best in Slot", "description": "Max out every equipment slot."},
     {"id": "spots_all", "name": "World Tour", "description": "Unlock every fishing spot."},
+    {"id": "ocean_first_entry", "name": "Beyond the Shore", "description": "Enter the Ocean for the first time.", "secret": True},
+    {"id": "ocean_first_catch", "name": "Saltwater Start", "description": "Catch your first Ocean creature."},
+    {"id": "ocean_depth_10", "name": "Leaving the Surface", "description": "Unlock 10 m in the Ocean."},
+    {"id": "ocean_depth_25", "name": "Into the Kelp", "description": "Unlock 25 m in the Ocean."},
+    {"id": "ocean_depth_50", "name": "Blue Expanse", "description": "Unlock 50 m in the Ocean."},
+    {"id": "ocean_depth_100", "name": "Twilight Bound", "description": "Unlock 100 m in the Ocean."},
+    {"id": "ocean_depth_1000", "name": "Midnight Descent", "description": "Reach 1,000 m in the Ocean."},
+    {"id": "ocean_depth_10000", "name": "Hadal Voyager", "description": "Reach 10,000 m in the Ocean."},
+    {"id": "ocean_eternal", "name": "A Glimpse of Forever", "description": "Discover an Eternal Ocean creature."},
+    {"id": "ocean_loadout", "name": "Deep-Sea Ready", "description": "Equip every Ocean loadout slot."},
+    {"id": "ocean_shop_10", "name": "Well Equipped", "description": "Own 10 permanent Ocean shop items."},
 ]
+
+LAVA_SPRINGS_ACHIEVEMENT_EXCLUSIONS = {
+    "collection_common",
+    "collection_uncommon",
+    "collection_rare",
+    "collection_epic",
+    "collection_secret",
+    "collection_ultra_rare",
+    "collection_all",
+    "keys_1000000",
+    "keys_10000000",
+    "banked_1000000",
+    "coins_1000000",
+    "coins_10000000",
+    "backpack_15",
+    "backpack_max",
+    "banked_upgrade_max",
+    "equipment_all_5",
+    "equipment_all_10",
+    "equipment_all_max",
+    "spots_all",
+    "ocean_first_entry",
+    "ocean_first_catch",
+    "ocean_depth_10",
+    "ocean_depth_25",
+    "ocean_depth_50",
+    "ocean_depth_100",
+    "ocean_depth_1000",
+    "ocean_depth_10000",
+    "ocean_eternal",
+    "ocean_loadout",
+    "ocean_shop_10",
+}
 
 
 @dataclass
@@ -828,6 +1070,8 @@ class HookedFish:
     skin_id: str = ""
     skin_name: str = ""
     skin_colors: list = field(default_factory=list)
+    gilded: bool = False
+    chest_reward_mult: float = 1.0
 
     @classmethod
     def from_roll(cls, stroke_multiplier, luck_bonus, spot_id="pond"):
@@ -920,6 +1164,16 @@ class TypeCast(tk.Tk):
         self.unlocked_fishing_spots = {"pond"}
         self.selected_fishing_spot = "pond"
         self.equipment_levels = DEFAULT_EQUIPMENT_LEVELS.copy()
+        self.ocean_unlocked = False
+        self.active_region = "ponds"
+        self.depth_tokens = 0
+        self.ocean_unlocked_depths = {0}
+        self.selected_ocean_depth = 0
+        self.ocean_catches = 0
+        self.ocean_shop_catches = 0
+        self.ocean_shop_stock = []
+        self.ocean_owned_items = set()
+        self.ocean_loadout = {slot: "" for slot in OCEAN_EQUIPMENT_SLOTS}
         self.hooked_fish = None
         self.cast_started_at = time.time()
         self.last_message = "Casting..."
@@ -966,9 +1220,15 @@ class TypeCast(tk.Tk):
         self.total_played_seconds = 0.0
         self.play_timer_started_at = time.time()
         self.last_save_at = time.time()
-        self.transparency = 1.0
-        self.transparency_percent = tk.DoubleVar(value=100)
-        self.transparency_text = tk.StringVar(value="100%")
+        self.save_dirty = False
+        self.pending_save_after_id = None
+        self.last_save_error = ""
+        self.game_transparency = 1.0
+        self.menu_transparency = 1.0
+        self.game_transparency_percent = tk.DoubleVar(value=100)
+        self.menu_transparency_percent = tk.DoubleVar(value=100)
+        self.game_transparency_text = tk.StringVar(value="100%")
+        self.menu_transparency_text = tk.StringVar(value="100%")
         self.dark_theme = False
         self.theme_name = "Light"
         self.theme_var = tk.StringVar(value=THEME_NAME_TO_LABEL[self.theme_name])
@@ -1004,7 +1264,7 @@ class TypeCast(tk.Tk):
         self.collection_header_fg = "#4b625d"
         self.content_listboxes = []
         self.asset_images = {}
-        self.attributes("-alpha", self.transparency)
+        self.attributes("-alpha", self.game_transparency)
         self.discord = None
         self.discord_enabled = False
         self.discord_status_text = tk.StringVar(value="Discord Rich Presence: disabled")
@@ -1026,6 +1286,9 @@ class TypeCast(tk.Tk):
         self.autosell_text = tk.StringVar(value="")
         self.banked_upgrade_text = tk.StringVar(value="")
         self.fishing_spot_text = tk.StringVar(value="")
+        self.ocean_status_text = tk.StringVar(value="")
+        self.depth_tokens_text = tk.StringVar(value="0")
+        self.ocean_item_detail_text = tk.StringVar(value="Select Ocean equipment to view its effect.")
         self.relic_text = tk.StringVar(value="Relics: none")
         self.potion_text = tk.StringVar(value="Potions: none")
         self.blessing_text = tk.StringVar(value="Blessings: none")
@@ -1046,6 +1309,7 @@ class TypeCast(tk.Tk):
         self.debug_selected_potion = tk.StringVar(value=POTIONS[0]["name"])
         self.debug_shop_prices_bypassed = tk.BooleanVar(value=False)
         self.active_menu_tab = "Inventory"
+        self.info_ocean_tab_visible = False
         self.menu_tab_frames = {}
         self.menu_tab_buttons = {}
         self.quit_confirm_pending = False
@@ -1131,6 +1395,11 @@ class TypeCast(tk.Tk):
     def has_asset_image(self, candidates):
         return any(self.asset_image(*parts) is not None for parts in candidates)
 
+    def dialog_parent(self) -> tk.Misc:
+        if self.menu is not None and self.menu.winfo_exists():
+            return self.menu
+        return self
+
     def build_menu(self):
         if self.menu and self.menu.winfo_exists():
             self.menu.lift()
@@ -1147,7 +1416,7 @@ class TypeCast(tk.Tk):
         self.menu.overrideredirect(True)
         self.position_menu(force=True)
         self.menu.attributes("-topmost", True)
-        self.menu.attributes("-alpha", self.transparency)
+        self.menu.attributes("-alpha", self.menu_transparency)
         self.apply_always_on_top()
         self.menu.protocol("WM_DELETE_WINDOW", self.close_menu)
 
@@ -1239,6 +1508,14 @@ class TypeCast(tk.Tk):
             ttk.Button(debug_resource_grid, text="+1000 Cast Tokens", command=lambda: self.debug_add_banked_keys(1000)).grid(row=0, column=2, sticky="ew", pady=(0, 4))
             ttk.Button(debug_resource_grid, text="+10000 Cast Tokens", command=lambda: self.debug_add_banked_keys(10000)).grid(row=1, column=2, sticky="ew")
 
+            debug_depth_token_grid = ttk.Frame(debug_tab)
+            debug_depth_token_grid.pack(fill="x", pady=(0, 8))
+            for column in range(3):
+                debug_depth_token_grid.columnconfigure(column, weight=1)
+            ttk.Button(debug_depth_token_grid, text="+1,000 DT", command=lambda: self.debug_add_depth_tokens(1000)).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            ttk.Button(debug_depth_token_grid, text="+10,000 DT", command=lambda: self.debug_add_depth_tokens(10000)).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+            ttk.Button(debug_depth_token_grid, text="+100,000 DT", command=lambda: self.debug_add_depth_tokens(100000)).grid(row=0, column=2, sticky="ew")
+
             ttk.Checkbutton(debug_tab, text="Bypass Shop Prices", variable=self.debug_shop_prices_bypassed, command=self.on_debug_shop_prices_toggle, style="Content.TCheckbutton").pack(anchor="w", pady=(4, 0))
 
             ttk.Label(debug_tab, text="Actions").pack(anchor="w", pady=(8, 4))
@@ -1284,7 +1561,7 @@ class TypeCast(tk.Tk):
             ttk.Label(debug_tab, text="Complete Collection Section").pack(anchor="w", pady=(8, 4))
             collection_debug_frame = ttk.Frame(debug_tab)
             collection_debug_frame.pack(fill="x")
-            collection_sections = ["Common", "Uncommon", "Rare", "Epic", "Secret", "Ultra Rare", HAPPY_FISH_COLLECTION, "All"]
+            collection_sections = ["Pond Fish", "Ocean Creatures", "Common", "Uncommon", "Rare", "Epic", "Secret", "Ultra Rare", HAPPY_FISH_COLLECTION, "All"]
             self.debug_collection_menu = ttk.Combobox(collection_debug_frame, values=collection_sections, textvariable=self.debug_selected_collection, state="readonly")
             self.debug_collection_menu.pack(side="left", fill="x", expand=True)
             ttk.Button(collection_debug_frame, text="Complete", command=self.debug_complete_collection_section).pack(side="left", padx=(8, 0))
@@ -1292,11 +1569,36 @@ class TypeCast(tk.Tk):
             ttk.Label(debug_tab, text="Unlock Systems").pack(anchor="w", pady=(8, 4))
             unlock_debug_frame = ttk.Frame(debug_tab)
             unlock_debug_frame.pack(fill="x")
-            ttk.Button(unlock_debug_frame, text="Unlock All Spots", command=self.debug_unlock_all_fishing_spots).pack(side="left", padx=(0, 8))
-            ttk.Button(unlock_debug_frame, text="Complete All Achievements", command=self.debug_complete_all_achievements).pack(side="left")
+            ttk.Button(unlock_debug_frame, text="All Pond Spots", command=self.debug_unlock_all_fishing_spots).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(unlock_debug_frame, text="Ocean", command=self.debug_unlock_ocean).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(unlock_debug_frame, text="Depths to 10 km", command=self.debug_unlock_ocean_depths).pack(side="left", fill="x", expand=True)
 
-        self.inventory_list = tk.Listbox(inventory_tab, width=self.scaled_menu_value(54), height=self.scaled_menu_value(7), activestyle="dotbox")
-        self.inventory_list.pack(fill="both", expand=True)
+            ocean_unlock_debug_frame = ttk.Frame(debug_tab)
+            ocean_unlock_debug_frame.pack(fill="x", pady=(4, 0))
+            ttk.Button(ocean_unlock_debug_frame, text="All Ocean Gear", command=self.debug_unlock_all_ocean_equipment).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(ocean_unlock_debug_frame, text="All Unlocks", command=self.debug_unlock_all_content).pack(side="left", fill="x", expand=True)
+
+            ttk.Label(debug_tab, text="Achievements").pack(anchor="w", pady=(8, 4))
+            achievement_debug_frame = ttk.Frame(debug_tab)
+            achievement_debug_frame.pack(fill="x")
+            ttk.Button(achievement_debug_frame, text="Check Achievements", command=self.debug_update_achievements).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(achievement_debug_frame, text="Complete All", command=self.debug_complete_all_achievements).pack(side="left", fill="x", expand=True)
+
+        inventory_frame = ttk.Frame(inventory_tab, style="Content.TFrame")
+        inventory_frame.pack(fill="both", expand=True)
+        inventory_frame.columnconfigure(0, weight=1)
+        inventory_frame.rowconfigure(0, weight=1)
+        inventory_scrollbar = ttk.Scrollbar(inventory_frame, orient="vertical")
+        inventory_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.inventory_list = tk.Listbox(
+            inventory_frame,
+            width=self.scaled_menu_value(54),
+            height=self.scaled_menu_value(14),
+            activestyle="dotbox",
+            yscrollcommand=inventory_scrollbar.set,
+        )
+        self.inventory_list.grid(row=0, column=0, sticky="nsew")
+        inventory_scrollbar.configure(command=self.inventory_list.yview)
         self.content_listboxes.append(self.inventory_list)
         inv_buttons = ttk.Frame(inventory_tab)
         inv_buttons.pack(fill="x", pady=(5, 0))
@@ -1352,8 +1654,12 @@ class TypeCast(tk.Tk):
         shop_sections.pack(fill="both", expand=True)
         upgrades_shop_tab = ttk.Frame(shop_sections, padding=4, style="Content.TFrame")
         spots_shop_tab = ttk.Frame(shop_sections, padding=4, style="Content.TFrame")
+        ocean_shop_tab = ttk.Frame(shop_sections, padding=4, style="Content.TFrame")
+        depth_token_shop_tab = ttk.Frame(shop_sections, padding=4, style="Content.TFrame")
         shop_sections.add(upgrades_shop_tab, text="Upgrades")
         shop_sections.add(spots_shop_tab, text="Spots")
+        shop_sections.add(ocean_shop_tab, text="Ocean")
+        shop_sections.add(depth_token_shop_tab, text="Depth Token Shop")
 
         ttk.Label(upgrades_shop_tab, text="Equipment", style="Content.TLabel").pack(anchor="w")
         self.shop_list = tk.Listbox(upgrades_shop_tab, width=self.scaled_menu_value(54), height=self.scaled_menu_value(4))
@@ -1390,6 +1696,45 @@ class TypeCast(tk.Tk):
         spot_buttons.pack(fill="x", pady=(5, 0))
         ttk.Button(spot_buttons, text="Buy Spot", command=self.buy_selected_fishing_spot).pack(side="left", padx=(0, 8))
         ttk.Button(spot_buttons, text="Use Spot", command=self.select_fishing_spot).pack(side="left")
+
+        ttk.Label(ocean_shop_tab, text="The Ocean", style="Content.TLabel").pack(anchor="w")
+        ttk.Label(ocean_shop_tab, textvariable=self.ocean_status_text, style="Content.Subtle.TLabel", wraplength=360).pack(anchor="w", pady=(1, 5))
+        ocean_access_buttons = ttk.Frame(ocean_shop_tab, style="Content.TFrame")
+        ocean_access_buttons.pack(fill="x")
+        ttk.Button(ocean_access_buttons, text="Unlock / Enter Ocean", command=self.unlock_or_enter_ocean).pack(side="left", padx=(0, 6))
+        ttk.Button(ocean_access_buttons, text="Return to Ponds", command=self.return_to_ponds).pack(side="left")
+        ttk.Label(ocean_shop_tab, text="Depths", style="Content.TLabel").pack(anchor="w", pady=(8, 0))
+        self.ocean_depth_list = tk.Listbox(ocean_shop_tab, width=self.scaled_menu_value(54), height=self.scaled_menu_value(5))
+        self.ocean_depth_list.pack(fill="x")
+        self.content_listboxes.append(self.ocean_depth_list)
+        ocean_depth_buttons = ttk.Frame(ocean_shop_tab, style="Content.TFrame")
+        ocean_depth_buttons.pack(fill="x", pady=(5, 0))
+        ttk.Button(ocean_depth_buttons, text="Unlock Next Depth", command=self.unlock_next_ocean_depth).pack(side="left", padx=(0, 6))
+        ttk.Button(ocean_depth_buttons, text="Use Depth", command=self.select_ocean_depth).pack(side="left")
+        ttk.Label(ocean_shop_tab, text="Cast Token Conversion", style="Content.TLabel").pack(anchor="w", pady=(8, 0))
+        ocean_conversion_buttons = ttk.Frame(ocean_shop_tab, style="Content.TFrame")
+        ocean_conversion_buttons.pack(fill="x", pady=(5, 0))
+        ttk.Button(ocean_conversion_buttons, text="Convert 1K CT", command=lambda: self.convert_cast_tokens(1000)).pack(side="left", padx=(0, 4))
+        ttk.Button(ocean_conversion_buttons, text="Convert 10K CT", command=lambda: self.convert_cast_tokens(10000)).pack(side="left", padx=(0, 4))
+        ttk.Button(ocean_conversion_buttons, text="Convert 100K CT", command=lambda: self.convert_cast_tokens(100000)).pack(side="left", padx=(0, 4))
+        ttk.Button(ocean_conversion_buttons, text="Convert Max", command=lambda: self.convert_cast_tokens(None)).pack(side="left")
+        ttk.Label(depth_token_shop_tab, text="Depth Token Shop", style="Content.TLabel").pack(anchor="w")
+        ttk.Label(depth_token_shop_tab, text="Rotating Equipment — 3 permanent offers", style="Content.Subtle.TLabel").pack(anchor="w", pady=(1, 5))
+        self.ocean_shop_list = tk.Listbox(depth_token_shop_tab, width=self.scaled_menu_value(54), height=self.scaled_menu_value(11))
+        self.ocean_shop_list.pack(fill="both", expand=True)
+        self.ocean_shop_list.bind("<<ListboxSelect>>", self.update_ocean_item_detail)
+        self.content_listboxes.append(self.ocean_shop_list)
+        ttk.Label(
+            depth_token_shop_tab,
+            textvariable=self.ocean_item_detail_text,
+            style="Content.Subtle.TLabel",
+            wraplength=self.scaled_menu_value(350),
+            justify="left",
+        ).pack(anchor="w", fill="x", pady=(4, 0))
+        ocean_gear_buttons = ttk.Frame(depth_token_shop_tab, style="Content.TFrame")
+        ocean_gear_buttons.pack(fill="x", pady=(5, 0))
+        ttk.Button(ocean_gear_buttons, text="Buy Selected", command=self.buy_ocean_shop_item).pack(side="left", padx=(0, 6))
+        ttk.Button(ocean_gear_buttons, text="Equip Selected", command=self.equip_ocean_shop_item).pack(side="left")
 
         stat_grid = ttk.Frame(stats_tab, style="Content.TFrame")
         stat_grid.pack(fill="x", pady=(0, 6))
@@ -1496,7 +1841,7 @@ class TypeCast(tk.Tk):
                 ),
                 (
                     "Potions",
-                    "Treasure chests can drop temporary potions. Stored potions appear in the Potions tab; use one when you want its coins or Cast Tokens effect to run for 15 minutes.",
+                    "Treasure chests can drop charge-based potions. Typing Tonic rewards fast streaks, Coin Draught raises new catch values, Storm Phial triggers progress surges, Gilded Vial can create valuable Gilded catches, Deep Current Elixir favors undiscovered creatures, and Sunken Gold Elixir improves upcoming treasure hunts. Using another copy extends its remaining charges.",
                 ),
                 (
                     "Visitor blessings",
@@ -1512,6 +1857,37 @@ class TypeCast(tk.Tk):
                 ),
             ],
         )
+        self.info_ocean_tab_visible = bool(self.ocean_unlocked)
+        if self.info_ocean_tab_visible:
+            add_info_tab(
+                "Ocean",
+                [
+                    (
+                        "Entering and leaving",
+                        "The Ocean is a permanent expansion and does not reset Pond progress. Use Unlock / Enter Ocean in Shop > Ocean to descend, and Return to Ponds whenever you want to fish at the original spots.",
+                    ),
+                    (
+                        "Depth progression",
+                        "The Surface, 10 m, 25 m, 50 m, and 100 m are the first major depths. After 100 m, the Ocean continues indefinitely. Unlock each next depth permanently with Depth Tokens, then select any unlocked depth from the depth list.",
+                    ),
+                    (
+                        "Depth Tokens",
+                        "Ocean catches award Depth Tokens based on the creature, rarity, depth, and equipped Ocean gear. Cast Tokens can also be converted in batches of 1,000, 10,000, 100,000, or as many as possible. Conversion is one-way.",
+                    ),
+                    (
+                        "Ocean equipment",
+                        "The Ocean uses a separate Vessel, Sonar, Suit, Lure, and Charm loadout. Its effects remain active while fishing in the Ponds: vessels improve reeling, sonar improves luck, suits improve catch value, lures improve Cast Token gains, and charms improve relic chances. Select an item to read its full effect.",
+                    ),
+                    (
+                        "Rotating shop",
+                        "The Ocean shop offers three permanent items and rotates after 25 Ocean catches. Only Ocean catches advance it. Purchased items leave the rotation forever, and a purchased offer stays empty until the next rotation.",
+                    ),
+                    (
+                        "Creatures and Eternal rarity",
+                        "Ocean creatures occupy different depth ranges and have their own collection. Eternal creatures are exclusive to the Ocean, exceptionally rare, and may require a deep descent. Happy Fish remain cosmetic and are not required for Ocean progress.",
+                    ),
+                ],
+            )
         status_info_tab = add_info_tab(
             "Settings",
             [
@@ -1529,11 +1905,16 @@ class TypeCast(tk.Tk):
         ttk.Label(status_info_tab, textvariable=self.input_status_text, style="Content.Subtle.TLabel", wraplength=info_wrap).pack(anchor="w", pady=(4, 0))
 
         ttk.Label(settings_tab, text="Appearance", style="Content.TLabel").pack(anchor="w")
-        ttk.Label(settings_tab, text="Transparency", style="Content.Subtle.TLabel").pack(anchor="w", pady=(8, 0))
-        slider_frame = ttk.Frame(settings_tab, style="Content.TFrame")
-        slider_frame.pack(fill="x", pady=(3, 6))
-        ttk.Scale(slider_frame, from_=20, to=100, variable=self.transparency_percent, command=self.on_transparency_change, style="Content.Horizontal.TScale").pack(side="left", fill="x", expand=True)
-        ttk.Label(slider_frame, textvariable=self.transparency_text, width=6, style="Content.TLabel").pack(side="left", padx=(8, 0))
+        ttk.Label(settings_tab, text="Game Window Transparency", style="Content.Subtle.TLabel").pack(anchor="w", pady=(8, 0))
+        game_transparency_frame = ttk.Frame(settings_tab, style="Content.TFrame")
+        game_transparency_frame.pack(fill="x", pady=(3, 6))
+        ttk.Scale(game_transparency_frame, from_=20, to=100, variable=self.game_transparency_percent, command=self.on_game_transparency_change, style="Content.Horizontal.TScale").pack(side="left", fill="x", expand=True)
+        ttk.Label(game_transparency_frame, textvariable=self.game_transparency_text, width=6, style="Content.TLabel").pack(side="left", padx=(8, 0))
+        ttk.Label(settings_tab, text="Menu Transparency", style="Content.Subtle.TLabel").pack(anchor="w", pady=(2, 0))
+        menu_transparency_frame = ttk.Frame(settings_tab, style="Content.TFrame")
+        menu_transparency_frame.pack(fill="x", pady=(3, 6))
+        ttk.Scale(menu_transparency_frame, from_=20, to=100, variable=self.menu_transparency_percent, command=self.on_menu_transparency_change, style="Content.Horizontal.TScale").pack(side="left", fill="x", expand=True)
+        ttk.Label(menu_transparency_frame, textvariable=self.menu_transparency_text, width=6, style="Content.TLabel").pack(side="left", padx=(8, 0))
         ttk.Label(settings_tab, text="Theme", style="Content.Subtle.TLabel").pack(anchor="w", pady=(6, 2))
         self.theme_menu = ttk.Combobox(settings_tab, values=THEME_MENU_LABELS, textvariable=self.theme_var, state="readonly", width=28)
         self.theme_menu.pack(anchor="w", fill="x", pady=(0, 6))
@@ -1738,22 +2119,39 @@ class TypeCast(tk.Tk):
         self.resource_deltas.append(ResourceDelta(resource, amount, now))
         self.resource_deltas = self.resource_deltas[-12:]
 
+    def mark_save_dirty(self, urgent=False):
+        self.save_dirty = True
+        if urgent:
+            self.save()
+            return
+        if self.pending_save_after_id is None:
+            self.pending_save_after_id = self.after(DIRTY_SAVE_DELAY_MS, self.run_dirty_save)
+
+    def run_dirty_save(self):
+        self.pending_save_after_id = None
+        if self.save_dirty:
+            self.save()
+
     def change_coins(self, amount):
         self.coins += int(amount)
         self.add_resource_delta("coins", amount)
+        self.mark_save_dirty()
 
     def change_keys(self, amount):
         self.total_keystrokes += int(amount)
         self.add_resource_delta("keys", amount)
+        self.mark_save_dirty()
 
     def change_banked_keys(self, amount):
         self.banked_keys += int(amount)
         self.add_resource_delta("banked_keys", amount)
+        self.mark_save_dirty()
 
     def add_log_entry(self, message):
         timestamp = time.strftime("%H:%M")
         self.event_log.insert(0, f"{timestamp} - {message}")
         self.event_log = self.event_log[:80]
+        self.mark_save_dirty()
 
     def debug_add_coins(self, amount=1000):
         self.change_coins(amount)
@@ -1770,6 +2168,13 @@ class TypeCast(tk.Tk):
     def debug_add_banked_keys(self, amount=1000):
         self.change_banked_keys(amount)
         self.last_message = f"Cheat: added {amount} Cast Tokens."
+        self.add_log_entry(self.last_message)
+        self.refresh_all()
+
+    def debug_add_depth_tokens(self, amount=1000):
+        self.depth_tokens += int(amount)
+        self.mark_save_dirty()
+        self.last_message = f"Cheat: added {amount:,} Depth Tokens."
         self.add_log_entry(self.last_message)
         self.refresh_all()
 
@@ -1895,6 +2300,7 @@ class TypeCast(tk.Tk):
     def debug_complete_collection_section(self):
         selected_section = self.debug_selected_collection.get()
         completed = 0
+        collection_entries = []
         if selected_section == HAPPY_FISH_COLLECTION:
             for skin in PRIDE_FISH_SKINS:
                 key = happy_fish_collection_key(skin["id"])
@@ -1903,18 +2309,33 @@ class TypeCast(tk.Tk):
                     completed += 1
                 entry["count"] = max(1, safe_int(entry.get("count", 0)))
             self.last_message = f"Cheat: completed {HAPPY_FISH_COLLECTION} collection ({completed} new)."
+            self.mark_save_dirty()
             self.refresh_all()
             return
-        for fish in FISH_TABLE:
-            if selected_section != "All" and fish["rarity"] != selected_section:
-                continue
+        if selected_section in ("Pond Fish", "All"):
+            collection_entries.extend(FISH_TABLE)
+        if selected_section in ("Ocean Creatures", "All"):
+            collection_entries.extend(OCEAN_COLLECTION)
+        if selected_section not in ("Pond Fish", "Ocean Creatures", "All"):
+            collection_entries.extend(fish for fish in FISH_TABLE if fish["rarity"] == selected_section)
+            collection_entries.extend(fish for fish in OCEAN_COLLECTION if fish["rarity"] == selected_section)
+
+        for fish in collection_entries:
             key = fish_collection_key(fish["rarity"], fish["name"])
             entry = self.collection_log.setdefault(key, {"count": 0, "best_value": 0})
             if safe_int(entry.get("count", 0)) <= 0:
                 completed += 1
             entry["count"] = max(1, safe_int(entry.get("count", 0)))
             entry["best_value"] = max(safe_int(entry.get("best_value", 0)), safe_int(fish.get("value", 0)))
+        if selected_section == "All":
+            for skin in PRIDE_FISH_SKINS:
+                key = happy_fish_collection_key(skin["id"])
+                entry = self.collection_log.setdefault(key, {"count": 0, "best_value": 0})
+                if safe_int(entry.get("count", 0)) <= 0:
+                    completed += 1
+                entry["count"] = max(1, safe_int(entry.get("count", 0)))
         self.last_message = f"Cheat: completed {selected_section} collection ({completed} new)."
+        self.mark_save_dirty()
         self.refresh_all()
 
     def debug_unlock_all_fishing_spots(self):
@@ -1922,28 +2343,198 @@ class TypeCast(tk.Tk):
         self.last_message = "Cheat: unlocked all fishing spots."
         self.refresh_all()
 
+    def debug_unlock_ocean(self):
+        self.ocean_unlocked = True
+        self.ocean_unlocked_depths.add(0)
+        self.active_region = "ocean"
+        self.depth_tokens += 10000
+        self.ensure_ocean_shop_stock()
+        self.mark_save_dirty()
+        self.last_message = "Cheat: unlocked the Ocean and added 10,000 Depth Tokens."
+        self.refresh_all()
+
+    def debug_unlock_ocean_depths(self):
+        self.ocean_unlocked = True
+        self.ocean_unlocked_depths.update(OCEAN_EARLY_DEPTHS)
+        self.ocean_unlocked_depths.update(range(150, 501, 50))
+        self.ocean_unlocked_depths.update(range(600, 1001, 100))
+        self.ocean_unlocked_depths.update(range(1500, 10001, 500))
+        self.selected_ocean_depth = 10000
+        self.active_region = "ocean"
+        self.ensure_ocean_shop_stock()
+        self.mark_save_dirty()
+        self.last_message = "Cheat: unlocked Ocean depths through 10,000 m."
+        self.refresh_all()
+
+    def debug_unlock_all_ocean_equipment(self):
+        self.ocean_unlocked = True
+        self.ocean_unlocked_depths.add(0)
+        self.ocean_owned_items = {item["id"] for item in OCEAN_EQUIPMENT_ITEMS}
+        for slot in OCEAN_EQUIPMENT_SLOTS:
+            slot_items = [item for item in OCEAN_EQUIPMENT_ITEMS if item["slot"] == slot]
+            if slot_items:
+                self.ocean_loadout[slot] = slot_items[-1]["id"]
+        self.ensure_ocean_shop_stock()
+        self.mark_save_dirty()
+        self.last_message = "Cheat: unlocked and equipped all Ocean gear."
+        self.refresh_all()
+
+    def debug_unlock_all_content(self):
+        self.unlocked_fishing_spots = {spot["id"] for spot in FISHING_SPOTS}
+        self.ocean_unlocked = True
+        self.ocean_unlocked_depths.update(OCEAN_EARLY_DEPTHS)
+        self.ocean_unlocked_depths.update(range(150, 501, 50))
+        self.ocean_unlocked_depths.update(range(600, 1001, 100))
+        self.ocean_unlocked_depths.update(range(1500, 10001, 500))
+        self.ocean_owned_items = {item["id"] for item in OCEAN_EQUIPMENT_ITEMS}
+        for slot in OCEAN_EQUIPMENT_SLOTS:
+            slot_items = [item for item in OCEAN_EQUIPMENT_ITEMS if item["slot"] == slot]
+            if slot_items:
+                self.ocean_loadout[slot] = slot_items[-1]["id"]
+        self.selected_ocean_depth = 10000
+        self.active_region = "ocean"
+        self.ensure_ocean_shop_stock()
+        self.mark_save_dirty()
+        self.last_message = "Cheat: unlocked all fishing spots, Ocean depths through 10,000 m, and Ocean gear."
+        self.refresh_all()
+
+    def debug_update_achievements(self):
+        before = len(self.achievements_unlocked)
+        self.update_achievements()
+        added = len(self.achievements_unlocked) - before
+        self.last_message = f"Cheat: checked achievements ({added} newly unlocked)."
+        self.mark_save_dirty()
+        self.refresh_all()
+
     def debug_complete_all_achievements(self):
         self.achievements_unlocked = {achievement["id"] for achievement in ACHIEVEMENTS}
+        self.mark_save_dirty()
         self.last_message = "Cheat: completed all achievements."
         self.refresh_all()
 
     def roll_next_hooked_fish(self):
+        sunken_gold = self.active_potion("sunken_gold_elixir")
+        chest_chance = TREASURE_CHEST_CHANCE
+        chest_stroke_mult = 1.0
+        chest_reward_mult = 1.0
+        if sunken_gold:
+            potion = self.potion_by_id("sunken_gold_elixir") or {}
+            chest_chance += float(potion.get("chest_chance_bonus", 0.0))
+            chest_stroke_mult = float(potion.get("chest_stroke_mult", 1.0))
+            chest_reward_mult = float(potion.get("chest_reward_mult", 1.0))
+            self.consume_potion_charge("sunken_gold_elixir")
         if (
             self.fish_since_last_treasure_chest >= TREASURE_CHEST_MIN_FISH_BETWEEN
-            and random.random() < TREASURE_CHEST_CHANCE
+            and random.random() < min(0.90, chest_chance)
         ):
             self.fish_since_last_treasure_chest = 0
             return HookedFish(
                 "Treasure Chest",
                 "Treasure",
-                TREASURE_CHEST_STROKES,
+                max(1, round(TREASURE_CHEST_STROKES * chest_stroke_mult)),
                 0,
                 "#c9823b",
                 "chest",
+                chest_reward_mult=chest_reward_mult,
             )
         if random.random() < BLESSING_EVENT_CHANCE:
             return self.roll_blessing_visitor()
-        return HookedFish.from_roll(self.stroke_multiplier(), self.luck_bonus(), self.selected_fishing_spot)
+        if self.active_region == "ocean" and self.ocean_unlocked:
+            return self.roll_ocean_creature()
+        fish_pool = [fish for fish in FISH_TABLE if fish.get("spot_id") in (self.selected_fishing_spot, "global")]
+        if not fish_pool:
+            fish_pool = [fish for fish in FISH_TABLE if fish.get("spot_id") in ("pond", "global")]
+        weights = [adjusted_fish_weight(fish, self.luck_bonus()) for fish in fish_pool]
+        discovery = self.active_potion("deep_current_elixir")
+        if discovery:
+            missing_mult = float((self.potion_by_id("deep_current_elixir") or {}).get("missing_weight_mult", 1.0))
+            weights = [
+                weight * missing_mult
+                if safe_int(self.collection_log.get(fish_collection_key(fish["rarity"], fish["name"]), {}).get("count", 0)) <= 0
+                else weight
+                for fish, weight in zip(fish_pool, weights)
+            ]
+        if not any(weight > 0 for weight in weights):
+            weights = [max(0.0, adjusted_fish_weight(fish, self.luck_bonus())) for fish in fish_pool]
+        selected = random.choices(fish_pool, weights=weights, k=1)[0]
+        fish = HookedFish(
+            selected["name"], selected["rarity"],
+            max(1, round(selected["strokes"] * self.stroke_multiplier())),
+            selected["value"], selected["color"],
+            spot_id=selected.get("spot_id", self.selected_fishing_spot),
+        )
+        apply_random_pride_skin(fish)
+        fish.value = max(1, round(fish.value * self.ocean_equipment_effect("catch_value_mult")))
+        return fish
+
+    def ocean_equipped_item(self, slot):
+        return OCEAN_EQUIPMENT_BY_ID.get(self.ocean_loadout.get(slot, ""), {})
+
+    def ocean_equipment_effect(self, key, default=1.0):
+        values = [float(self.ocean_equipped_item(slot).get(key, default)) for slot in OCEAN_EQUIPMENT_SLOTS]
+        relevant = [value for value in values if value != default]
+        if not relevant:
+            return default
+        result = default
+        for value in relevant:
+            result *= value
+        return result
+
+    def roll_ocean_creature(self):
+        depth = self.selected_ocean_depth
+        available = [
+            creature for creature in OCEAN_CREATURES
+            if depth >= creature["min_depth"] and (creature["max_depth"] is None or depth <= creature["max_depth"])
+        ]
+        if not available:
+            available = OCEAN_CREATURES[:3]
+        rare_bonus = self.ocean_equipment_effect("rare_bonus")
+        eternal_bonus = self.ocean_equipment_effect("eternal_bonus")
+        weights = []
+        for creature in available:
+            weight = creature["weight"]
+            if creature.get("rarity") == "Eternal":
+                weight *= eternal_bonus
+            elif weight <= 10:
+                weight *= rare_bonus
+            discovery = self.active_potion("deep_current_elixir")
+            if discovery:
+                rarity_candidates = ("Eternal",) if creature.get("rarity") == "Eternal" else ("Common", "Uncommon", "Rare", "Epic")
+                if any(
+                    safe_int(self.collection_log.get(fish_collection_key(rarity, creature["name"]), {}).get("count", 0)) <= 0
+                    for rarity in rarity_candidates
+                ):
+                    weight *= float((self.potion_by_id("deep_current_elixir") or {}).get("missing_weight_mult", 1.0))
+            weights.append(weight)
+        creature = random.choices(available, weights=weights, k=1)[0]
+        rarity = creature.get("rarity")
+        rarity_mult = 1.0
+        value_mult = 1.0
+        if not rarity:
+            rarity_choices = ("Common", "Uncommon", "Rare", "Epic")
+            rarity_weights = [62, 26, 9, 3]
+            if self.active_potion("deep_current_elixir"):
+                missing_mult = float((self.potion_by_id("deep_current_elixir") or {}).get("missing_weight_mult", 1.0))
+                rarity_weights = [
+                    weight * missing_mult
+                    if safe_int(self.collection_log.get(fish_collection_key(candidate, creature["name"]), {}).get("count", 0)) <= 0
+                    else weight
+                    for candidate, weight in zip(rarity_choices, rarity_weights)
+                ]
+            rarity = random.choices(rarity_choices, weights=rarity_weights, k=1)[0]
+            rarity_mult = {"Common": 0.8, "Uncommon": 1.0, "Rare": 1.35, "Epic": 1.85}[rarity]
+            value_mult = {"Common": 0.7, "Uncommon": 1.0, "Rare": 2.0, "Epic": 4.2}[rarity]
+        stroke_mult = self.ocean_equipment_effect("stroke_mult")
+        depth_mult = 1.0 + min(3.0, depth / 5000)
+        return HookedFish(
+            creature["name"],
+            rarity,
+            max(1, round(creature["strokes"] * rarity_mult * depth_mult * stroke_mult)),
+            max(1, round(creature["value"] * value_mult * depth_mult * self.ocean_equipment_effect("catch_value_mult"))),
+            creature["color"],
+            "fish",
+            spot_id=f"ocean:{depth}",
+        )
 
     def roll_blessing_visitor(self):
         return self.create_blessing_visitor_hook(random.choice(BLESSING_VISITORS))
@@ -1985,7 +2576,7 @@ class TypeCast(tk.Tk):
         if self.cleanup_active_blessings():
             self.refresh_all()
         self.update_game_info_panel_visibility()
-        if time.time() - self.last_save_at >= AUTOSAVE_SECONDS:
+        if self.save_dirty or time.time() - self.last_save_at >= AUTOSAVE_SECONDS:
             self.save()
         if self.rod_pull > 0:
             self.rod_pull = max(0.0, self.rod_pull - 0.25)
@@ -2232,6 +2823,8 @@ class TypeCast(tk.Tk):
             self.discord_status_text.set(message)
 
     def discord_fishing_spot_text(self):
+        if self.active_region == "ocean" and self.ocean_unlocked:
+            return f"Ocean — {self.ocean_depth_name(self.selected_ocean_depth)}"
         spot = self.fishing_spot_by_id(self.selected_fishing_spot)
         return f"Casting at {spot['name']}"
 
@@ -2248,20 +2841,45 @@ class TypeCast(tk.Tk):
     def add_keystroke(self):
         self.mark_player_activity()
         self.change_keys(1)
+        potion_progress_bonus = 0.0
+        typing_tonic = self.active_potion("typing_tonic")
+        if typing_tonic:
+            now = time.time()
+            previous_key_at = float(typing_tonic.get("last_key_at", 0.0))
+            streak = safe_int(typing_tonic.get("streak", 0))
+            streak = min(50, streak + 1) if now - previous_key_at <= 2.0 else 1
+            typing_tonic["streak"] = streak
+            typing_tonic["last_key_at"] = now
+            potion_progress_bonus += min(0.50, streak * 0.01)
+            self.consume_potion_charge("typing_tonic")
+        storm_phial = self.active_potion("storm_phial")
+        if storm_phial:
+            storm = self.potion_by_id("storm_phial") or {}
+            counter = safe_int(storm_phial.get("counter", 0)) + 1
+            surge_every = max(1, safe_int(storm.get("surge_every", 50), 50))
+            if counter >= surge_every:
+                potion_progress_bonus += safe_int(storm.get("surge_progress", 75), 75)
+                counter = 0
+                self.last_message = "Storm Phial surge! Bonus catch progress."
+            storm_phial["counter"] = counter
+            self.consume_potion_charge("storm_phial")
         completed_catch = False
         if self.hooked_fish:
             if self.hooked_fish.kind == "chest":
-                self.hooked_fish.progress += 1
+                self.hooked_fish.progress += 1 + potion_progress_bonus
                 self.last_message = "Opening treasure chest..."
             elif self.hooked_fish.kind == "blessing":
-                self.hooked_fish.progress += 1
+                self.hooked_fish.progress += 1 + potion_progress_bonus
                 self.last_message = f"Securing {self.hooked_fish.name}'s blessing..."
             else:
                 progress = 1
                 if random.random() < self.accuracy_chance():
                     progress += 1
                     self.last_message = "Accurate keystroke! +2"
-                self.hooked_fish.progress += progress * self.banked_progress_multiplier() * self.rod_blessing_progress_multiplier()
+                self.hooked_fish.progress += (
+                    progress * self.banked_progress_multiplier() * self.rod_blessing_progress_multiplier()
+                    + potion_progress_bonus
+                )
             if self.hooked_fish.progress >= self.hooked_fish.strokes:
                 completed_catch = True
                 if self.hooked_fish.kind == "chest":
@@ -2289,11 +2907,12 @@ class TypeCast(tk.Tk):
         if chest is None:
             return
         reward_type = random.choice(("coins", "Cast Tokens"))
-        amount = random.randint(250, TREASURE_CHEST_MAX_REWARD)
+        amount = round(random.randint(250, TREASURE_CHEST_MAX_REWARD) * max(1.0, float(getattr(chest, "chest_reward_mult", 1.0))))
         relic = self.roll_treasure_relic()
         potion = self.roll_treasure_potion()
         self.hooked_fish = None
         self.cast_started_at = time.time()
+        self.mark_save_dirty()
         if reward_type == "coins":
             self.change_coins(amount)
         else:
@@ -2326,6 +2945,7 @@ class TypeCast(tk.Tk):
             return
         self.hooked_fish = None
         self.cast_started_at = time.time()
+        self.mark_save_dirty()
         if self.stored_blessing_count() >= self.blessing_trophy_slots():
             self.last_message = f"No trophy slot open: {visitor_fish.name}'s blessing slipped away."
             self.add_log_entry(self.last_message)
@@ -2368,6 +2988,7 @@ class TypeCast(tk.Tk):
             "strokes": visitor_fish.strokes,
             remaining_key: uses,
         }
+        self.mark_save_dirty()
         use_label = f"{uses} catches" if slot == "body" else f"{uses} keystrokes"
         self.last_message = f"Blessing active: {visitor_fish.name} grants {self.blessing_effect_text(slot, bonus)} for the next {use_label}."
         self.add_log_entry(self.last_message)
@@ -2394,7 +3015,8 @@ class TypeCast(tk.Tk):
         self.activate_blessing_fish(visitor_fish)
 
     def roll_treasure_relic(self):
-        if random.random() >= RELIC_DROP_CHANCE:
+        relic_chance_bonus = float(self.ocean_equipped_item("charm").get("relic_chance_bonus", 0.0))
+        if random.random() >= min(0.95, RELIC_DROP_CHANCE + relic_chance_bonus):
             return None
         weights = [relic["weight"] for relic in RELICS]
         return random.choices(RELICS, weights=weights, k=1)[0]
@@ -2408,17 +3030,24 @@ class TypeCast(tk.Tk):
     def add_relic(self, relic):
         relic_id = relic["id"]
         self.relics[relic_id] = safe_int(self.relics.get(relic_id, 0)) + 1
+        self.mark_save_dirty()
         self.add_log_entry(f"Relic acquired: {relic['rarity']} {relic['name']}.")
 
     def add_potion(self, potion):
         potion_id = potion["id"]
         self.stored_potions[potion_id] = safe_int(self.stored_potions.get(potion_id, 0)) + 1
+        self.mark_save_dirty()
         self.add_log_entry(f"Potion acquired: {potion['rarity']} {potion['name']}.")
 
     def activate_potion(self, potion):
-        expires_at = time.time() + POTION_DURATION_SECONDS
-        self.potions.append({"id": potion["id"], "expires_at": expires_at})
-        self.add_log_entry(f"Potion active: {potion['rarity']} {potion['name']} for 15 minutes.")
+        charges = safe_int(potion.get("charges", 1), 1)
+        active = self.active_potion(potion["id"])
+        if active:
+            active["remaining"] = safe_int(active.get("remaining", 0)) + charges
+        else:
+            self.potions.append({"id": potion["id"], "remaining": charges, "counter": 0, "streak": 0, "last_key_at": 0.0})
+        self.mark_save_dirty()
+        self.add_log_entry(f"Potion active: {potion['rarity']} {potion['name']} — {self.potion_effect_text(potion)}.")
 
     def owned_potions_in_display_order(self):
         return [potion for potion in POTIONS if safe_int(self.stored_potions.get(potion["id"], 0)) > 0]
@@ -2428,12 +3057,12 @@ class TypeCast(tk.Tk):
             return None
         selection = self.potion_list.curselection()
         if not selection:
-            messagebox.showinfo("Potions", "Select a potion first.", parent=self.menu)
+            messagebox.showinfo("Potions", "Select a potion first.", parent=self.dialog_parent())
             return None
         owned_potions = self.owned_potions_in_display_order()
         index = selection[0]
         if index >= len(owned_potions):
-            messagebox.showinfo("Potions", "Select a stored potion to use.", parent=self.menu)
+            messagebox.showinfo("Potions", "Select a stored potion to use.", parent=self.dialog_parent())
             return None
         return owned_potions[index]
 
@@ -2451,8 +3080,9 @@ class TypeCast(tk.Tk):
             self.stored_potions.pop(potion_id, None)
         else:
             self.stored_potions[potion_id] = count - 1
+        self.mark_save_dirty()
         self.activate_potion(potion)
-        self.last_message = f"Used {potion['name']}. {self.potion_effect_text(potion)} for 15 minutes."
+        self.last_message = f"Used {potion['name']}. {self.potion_effect_text(potion)}."
         self.refresh_all()
 
     def relic_by_id(self, relic_id):
@@ -2484,36 +3114,35 @@ class TypeCast(tk.Tk):
         return total
 
     def cleanup_active_potions(self):
-        now = time.time()
         before = len(self.potions)
-        active_potions = []
-        for potion in self.potions:
-            try:
-                expires_at = float(potion.get("expires_at", 0))
-            except (AttributeError, TypeError, ValueError):
-                continue
-            if expires_at > now and self.potion_by_id(potion.get("id")):
-                active_potions.append({"id": potion.get("id"), "expires_at": expires_at})
-        self.potions = active_potions
+        self.potions = [
+            potion for potion in self.potions
+            if isinstance(potion, dict)
+            and self.potion_by_id(potion.get("id"))
+            and safe_int(potion.get("remaining", 0)) > 0
+        ]
         return len(self.potions) != before
 
-    def potion_key_rate(self):
+    def active_potion(self, potion_id):
+        for active in self.potions:
+            if active.get("id") == potion_id and safe_int(active.get("remaining", 0)) > 0:
+                return active
+        return None
+
+    def consume_potion_charge(self, potion_id, amount=1):
+        active = self.active_potion(potion_id)
+        if not active:
+            return False
+        active["remaining"] = max(0, safe_int(active.get("remaining", 0)) - max(1, safe_int(amount, 1)))
         self.cleanup_active_potions()
-        total = 0
-        for active_potion in self.potions:
-            potion = self.potion_by_id(active_potion.get("id"))
-            if potion:
-                total += safe_int(potion.get("keys", 0))
-        return total
+        self.mark_save_dirty()
+        return True
+
+    def potion_key_rate(self):
+        return 0
 
     def potion_coin_rate(self):
-        self.cleanup_active_potions()
-        total = 0
-        for active_potion in self.potions:
-            potion = self.potion_by_id(active_potion.get("id"))
-            if potion:
-                total += safe_int(potion.get("coins", 0))
-        return total
+        return 0
 
     def process_relic_payouts(self):
         elapsed = time.time() - self.last_relic_payout_at
@@ -2578,6 +3207,36 @@ class TypeCast(tk.Tk):
         fish = self.hooked_fish
         if fish is None:
             return
+        coin_draught = self.active_potion("coin_draught")
+        if coin_draught:
+            fish.value = max(1, round(fish.value * float((self.potion_by_id("coin_draught") or {}).get("value_mult", 1.0))))
+            self.consume_potion_charge("coin_draught")
+        gilded_token_mult = 1.0
+        gilded_vial = self.active_potion("gilded_vial")
+        if gilded_vial:
+            gilded = self.potion_by_id("gilded_vial") or {}
+            if random.random() < float(gilded.get("gilded_chance", 0.0)):
+                fish.gilded = True
+                fish.value = max(1, round(fish.value * float(gilded.get("gilded_value_mult", 1.0))))
+                gilded_token_mult = float(gilded.get("gilded_token_mult", 1.0))
+            self.consume_potion_charge("gilded_vial")
+        if self.active_potion("deep_current_elixir"):
+            self.consume_potion_charge("deep_current_elixir")
+        is_ocean_catch = str(getattr(fish, "spot_id", "")).startswith("ocean:")
+        if is_ocean_catch:
+            creature = next((entry for entry in OCEAN_CREATURES if entry["name"] == fish.name), None)
+            base_tokens = creature["tokens"] if creature else 1
+            rarity_mult = {"Common": 1.0, "Uncommon": 1.25, "Rare": 1.75, "Epic": 2.75, "Eternal": 6.0}.get(fish.rarity, 1.0)
+            token_mult = self.ocean_equipment_effect("token_mult")
+            if self.selected_ocean_depth >= 100:
+                token_mult *= self.ocean_equipment_effect("deep_token_mult")
+            gained_tokens = max(1, round(base_tokens * rarity_mult * token_mult * gilded_token_mult))
+            self.depth_tokens += gained_tokens
+            self.ocean_catches += 1
+            self.ocean_shop_catches += 1
+            if self.ocean_shop_catches >= OCEAN_SHOP_ROTATION_CATCHES:
+                self.rotate_ocean_shop()
+            self.mark_save_dirty()
         self.consume_blessing_catch("body")
         self.hooked_fish = None
         self.cast_started_at = time.time()
@@ -2587,14 +3246,16 @@ class TypeCast(tk.Tk):
             self.change_coins(earned)
             self.record_collection_fish(fish.rarity, fish.name, fish.value)
             self.record_happy_fish(fish)
-            self.last_message = f"Inventory full: overflow-sold {hooked_fish_display_name(fish)} for {earned} coins."
+            ocean_reward = f" and earned {gained_tokens} Depth Tokens" if is_ocean_catch else ""
+            self.last_message = f"Inventory full: overflow-sold {hooked_fish_display_name(fish)} for {earned} coins{ocean_reward}."
             self.add_log_entry(self.last_message)
             self.refresh_all()
             return
         self.inventory.append(asdict(fish))
         self.record_collection_fish(fish.rarity, fish.name, fish.value)
         self.record_happy_fish(fish)
-        self.last_message = f"Caught a {hooked_fish_display_name(fish)}!"
+        ocean_reward = f" +{gained_tokens} Depth Tokens." if is_ocean_catch else ""
+        self.last_message = f"Caught a {hooked_fish_display_name(fish)}!{ocean_reward}"
         self.add_log_entry(self.last_message)
         self.refresh_all()
 
@@ -2697,7 +3358,7 @@ class TypeCast(tk.Tk):
             return None
         selection = self.inventory_list.curselection()
         if not selection:
-            messagebox.showinfo("Inventory", "Select a fish first.", parent=self.menu)
+            messagebox.showinfo("Inventory", "Select a fish first.", parent=self.dialog_parent())
             return None
         return selection[0]
 
@@ -2738,6 +3399,7 @@ class TypeCast(tk.Tk):
         if self.should_pay_shop_cost():
             self.change_coins(-price)
         self.equipment_levels[slot] += 1
+        self.mark_save_dirty()
         self.last_message = f"Upgraded {slot.title()} to {item['name']} for {price} coins."
         if self.debug_shop_bypass_enabled():
             self.last_message += " (debug bypass)"
@@ -2758,6 +3420,7 @@ class TypeCast(tk.Tk):
             self.change_coins(-price)
         self.backpack_level = upgrade["level"]
         self.inventory_limit = self.current_inventory_limit()
+        self.mark_save_dirty()
         self.last_message = f"Backpack upgraded to {upgrade['slots']} slots for {price} coins."
         if self.debug_shop_bypass_enabled():
             self.last_message += " (debug bypass)"
@@ -2786,6 +3449,7 @@ class TypeCast(tk.Tk):
         if self.should_pay_shop_cost():
             self.change_banked_keys(-upgrade["cost"])
         self.banked_upgrade_level += 1
+        self.mark_save_dirty()
         self.last_message = f"Purchased {upgrade['name']} (+{int((upgrade['mult'] - 1) * 100)}% progress)."
         if self.debug_shop_bypass_enabled():
             self.last_message += " (debug bypass)"
@@ -2811,6 +3475,7 @@ class TypeCast(tk.Tk):
             self.change_coins(-price)
         self.autosell_level += 1
         self.last_autosell_at = time.time()
+        self.mark_save_dirty()
         self.last_message = f"Purchased {upgrade['name']} ({upgrade['percent']}% auto-sell)."
         if self.debug_shop_bypass_enabled():
             self.last_message += " (debug bypass)"
@@ -2821,7 +3486,7 @@ class TypeCast(tk.Tk):
             return None
         selection = self.fishing_spot_list.curselection()
         if not selection:
-            messagebox.showinfo("Fishing Spots", "Select a fishing spot first.", parent=self.menu)
+            messagebox.showinfo("Fishing Spots", "Select a fishing spot first.", parent=self.dialog_parent())
             return None
         return selection[0]
 
@@ -2842,7 +3507,7 @@ class TypeCast(tk.Tk):
         if cost_type == "collection":
             return f"{spot['cost']} collection entries"
         if cost_type == "achievements":
-            return "all non-collection achievements"
+            return "most non-collection achievements"
         return ""
 
     def can_afford_fishing_spot(self, spot):
@@ -2868,7 +3533,7 @@ class TypeCast(tk.Tk):
         return [
             achievement["id"]
             for achievement in ACHIEVEMENTS
-            if not achievement["id"].startswith("collection_") and achievement["id"] != "spots_all"
+            if achievement["id"] not in LAVA_SPRINGS_ACHIEVEMENT_EXCLUSIONS
         ]
 
     def pay_fishing_spot_cost(self, spot):
@@ -2894,6 +3559,7 @@ class TypeCast(tk.Tk):
         self.pay_fishing_spot_cost(spot)
         self.unlocked_fishing_spots.add(spot["id"])
         self.selected_fishing_spot = spot["id"]
+        self.mark_save_dirty()
         self.last_message = f"Unlocked {spot['name']}."
         if self.debug_shop_bypass_enabled():
             self.last_message += " (debug bypass)"
@@ -2908,9 +3574,211 @@ class TypeCast(tk.Tk):
             self.refresh_all()
             return
         self.selected_fishing_spot = spot["id"]
+        self.mark_save_dirty()
         self.last_message = f"Now fishing at {spot['name']}."
         self.refresh_all()
         self.draw_overlay()
+
+    def ocean_entry_requirements(self):
+        return {
+            "Pond collection complete": self.collection_discovered_count() >= len(FISH_TABLE),
+            "All Pond spots unlocked": all(spot["id"] in self.unlocked_fishing_spots for spot in FISHING_SPOTS),
+            "All equipment level 10+": all(self.equipment_levels.get(slot, 0) >= 10 for slot in EQUIPMENT_SLOTS),
+            "Cast Token upgrade level 3+": self.banked_upgrade_level >= OCEAN_ENTRY_CAST_UPGRADE_LEVEL,
+            "250,000 lifetime keys": self.total_keystrokes >= OCEAN_ENTRY_LIFETIME_KEYS,
+        }
+
+    def unlock_or_enter_ocean(self):
+        if not self.ocean_unlocked:
+            missing = [name for name, met in self.ocean_entry_requirements().items() if not met]
+            if missing:
+                self.last_message = "Ocean locked: " + ", ".join(missing) + "."
+                self.refresh_all()
+                return
+            self.ocean_unlocked = True
+            self.ocean_unlocked_depths.add(0)
+            self.achievements_unlocked.add("ocean_first_entry")
+            self.ensure_ocean_shop_stock()
+            self.add_log_entry("The Ocean is permanently unlocked.")
+        self.active_region = "ocean"
+        self.hooked_fish = None
+        self.cast_started_at = time.time()
+        self.last_message = f"Entered the Ocean at {self.ocean_depth_name(self.selected_ocean_depth)}."
+        self.mark_save_dirty(urgent=True)
+        self.refresh_all()
+        self.draw_overlay()
+
+    def return_to_ponds(self):
+        self.active_region = "ponds"
+        self.hooked_fish = None
+        self.cast_started_at = time.time()
+        self.last_message = f"Returned to {self.fishing_spot_by_id(self.selected_fishing_spot)['name']}."
+        self.mark_save_dirty()
+        self.refresh_all()
+        self.draw_overlay()
+
+    def ocean_depth_name(self, depth):
+        return OCEAN_DEPTH_NAMES.get(depth, f"{depth:,} m - Open Ocean")
+
+    def ocean_depth_sequence(self):
+        depths = sorted(self.ocean_unlocked_depths)
+        next_depth = self.next_ocean_depth()
+        if next_depth not in depths:
+            depths.append(next_depth)
+        return depths
+
+    def next_ocean_depth(self):
+        deepest = max(self.ocean_unlocked_depths or {0})
+        for depth in OCEAN_EARLY_DEPTHS:
+            if depth > deepest:
+                return depth
+        if deepest < 1000:
+            return deepest + (50 if deepest < 500 else 100)
+        if deepest < 10000:
+            return deepest + 500
+        return deepest + 1000
+
+    def ocean_depth_cost(self, depth):
+        if depth in OCEAN_DEPTH_COSTS:
+            return OCEAN_DEPTH_COSTS[depth]
+        return max(900, round(600 + (depth ** 0.78) * 10))
+
+    def unlock_next_ocean_depth(self):
+        if not self.ocean_unlocked:
+            self.last_message = "Unlock the Ocean first."
+            self.refresh_all()
+            return
+        depth = self.next_ocean_depth()
+        cost = self.ocean_depth_cost(depth)
+        if not self.debug_shop_bypass_enabled() and self.depth_tokens < cost:
+            self.last_message = f"Need {cost:,} Depth Tokens to unlock {self.ocean_depth_name(depth)}."
+            self.refresh_all()
+            return
+        if not self.debug_shop_bypass_enabled():
+            self.depth_tokens -= cost
+        self.ocean_unlocked_depths.add(depth)
+        self.selected_ocean_depth = depth
+        self.active_region = "ocean"
+        self.mark_save_dirty()
+        self.last_message = f"Unlocked {self.ocean_depth_name(depth)}."
+        self.refresh_all()
+
+    def selected_ocean_depth_from_list(self):
+        if not hasattr(self, "ocean_depth_list"):
+            return None
+        selected = self.ocean_depth_list.curselection()
+        depths = self.ocean_depth_sequence()
+        if not selected or selected[0] >= len(depths):
+            return None
+        return depths[selected[0]]
+
+    def select_ocean_depth(self):
+        depth = self.selected_ocean_depth_from_list()
+        if depth is None:
+            return
+        if depth not in self.ocean_unlocked_depths:
+            self.last_message = f"Unlock {self.ocean_depth_name(depth)} first."
+            self.refresh_all()
+            return
+        self.selected_ocean_depth = depth
+        self.active_region = "ocean"
+        self.hooked_fish = None
+        self.cast_started_at = time.time()
+        self.last_message = f"Now fishing at {self.ocean_depth_name(depth)}."
+        self.mark_save_dirty()
+        self.refresh_all()
+        self.draw_overlay()
+
+    def convert_cast_tokens(self, cast_token_amount: Optional[int] = OCEAN_TOKEN_CONVERSION_COST):
+        if not self.ocean_unlocked:
+            self.last_message = "Unlock the Ocean before converting Cast Tokens."
+        else:
+            if cast_token_amount is None:
+                cast_token_amount = (self.banked_keys // OCEAN_TOKEN_CONVERSION_COST) * OCEAN_TOKEN_CONVERSION_COST
+            cast_token_amount = max(
+                OCEAN_TOKEN_CONVERSION_COST,
+                (safe_int(cast_token_amount) // OCEAN_TOKEN_CONVERSION_COST) * OCEAN_TOKEN_CONVERSION_COST,
+            )
+            if self.banked_keys < cast_token_amount:
+                self.last_message = f"Need {cast_token_amount:,} Cast Tokens."
+                self.refresh_all()
+                return
+            gained_tokens = (cast_token_amount // OCEAN_TOKEN_CONVERSION_COST) * OCEAN_TOKEN_CONVERSION_GAIN
+            self.change_banked_keys(-cast_token_amount)
+            self.depth_tokens += gained_tokens
+            self.mark_save_dirty()
+            self.last_message = f"Converted {cast_token_amount:,} Cast Tokens into {gained_tokens:,} Depth Tokens."
+        self.refresh_all()
+
+    def ensure_ocean_shop_stock(self):
+        valid = [
+            item_id for item_id in self.ocean_shop_stock
+            if item_id in OCEAN_EQUIPMENT_BY_ID and item_id not in self.ocean_owned_items
+        ]
+        remaining = [
+            item["id"] for item in OCEAN_EQUIPMENT_ITEMS
+            if item["id"] not in self.ocean_owned_items and item["id"] not in valid
+        ]
+        while len(valid) < 3 and remaining:
+            item_id = random.choice(remaining)
+            remaining.remove(item_id)
+            valid.append(item_id)
+        self.ocean_shop_stock = valid
+
+    def rotate_ocean_shop(self):
+        remaining = [item["id"] for item in OCEAN_EQUIPMENT_ITEMS if item["id"] not in self.ocean_owned_items]
+        self.ocean_shop_stock = random.sample(remaining, min(3, len(remaining)))
+        self.ocean_shop_catches = 0
+
+    def selected_ocean_shop_item(self):
+        if not hasattr(self, "ocean_shop_list"):
+            return None
+        selected = self.ocean_shop_list.curselection()
+        display_ids = getattr(self, "ocean_shop_display_ids", self.ocean_shop_stock)
+        if not selected or selected[0] >= len(display_ids):
+            return None
+        return OCEAN_EQUIPMENT_BY_ID.get(display_ids[selected[0]])
+
+    def update_ocean_item_detail(self, event=None):
+        item = self.selected_ocean_shop_item()
+        if not item:
+            self.ocean_item_detail_text.set("Select Ocean equipment to view its effect.")
+            return
+        ownership = "Owned" if item["id"] in self.ocean_owned_items else f"Costs {item['cost']:,} Depth Tokens"
+        equipped = " Currently equipped." if self.ocean_loadout.get(item["slot"]) == item["id"] else ""
+        self.ocean_item_detail_text.set(
+            f"{item['name']} — {item['slot'].title()}\n{item['effect']} · {ownership}.{equipped}"
+        )
+
+    def buy_ocean_shop_item(self):
+        item = self.selected_ocean_shop_item()
+        if not item:
+            return
+        if item["id"] in self.ocean_owned_items:
+            self.last_message = f"{item['name']} is already owned."
+        elif not self.debug_shop_bypass_enabled() and self.depth_tokens < item["cost"]:
+            self.last_message = f"Need {item['cost']:,} Depth Tokens for {item['name']}."
+        else:
+            if not self.debug_shop_bypass_enabled():
+                self.depth_tokens -= item["cost"]
+            self.ocean_owned_items.add(item["id"])
+            self.ocean_shop_stock = [item_id for item_id in self.ocean_shop_stock if item_id != item["id"]]
+            self.ocean_loadout[item["slot"]] = item["id"]
+            self.mark_save_dirty()
+            self.last_message = f"Purchased and equipped {item['name']}."
+        self.refresh_all()
+
+    def equip_ocean_shop_item(self):
+        item = self.selected_ocean_shop_item()
+        if not item:
+            return
+        if item["id"] not in self.ocean_owned_items:
+            self.last_message = "Purchase that item before equipping it."
+        else:
+            self.ocean_loadout[item["slot"]] = item["id"]
+            self.mark_save_dirty()
+            self.last_message = f"Equipped {item['name']}."
+        self.refresh_all()
 
     def perform_autosell(self):
         upgrade = AUTOSALE_UPGRADES[self.autosell_level - 1]
@@ -2920,12 +3788,14 @@ class TypeCast(tk.Tk):
         sold = regular_fish[:count]
         if not sold:
             self.last_autosell_at = time.time()
+            self.mark_save_dirty()
             return
         earned = sum(fish["value"] for fish in sold)
         sold_ids = {id(fish) for fish in sold}
         self.inventory = [fish for fish in self.inventory if id(fish) not in sold_ids]
         self.change_coins(earned)
         self.last_autosell_at = time.time()
+        self.mark_save_dirty()
         self.last_message = f"Auto-sold {len(sold)} fish for {earned} coins."
         self.refresh_all()
 
@@ -2956,7 +3826,7 @@ class TypeCast(tk.Tk):
             return None
         selection = self.relic_list.curselection()
         if not selection:
-            messagebox.showinfo("Relics", "Select a relic first.", parent=self.menu)
+            messagebox.showinfo("Relics", "Select a relic first.", parent=self.dialog_parent())
             return None
         owned_relics = self.owned_relics_in_display_order()
         index = selection[0]
@@ -3542,19 +4412,37 @@ class TypeCast(tk.Tk):
         blue = int(bg[5:7], 16)
         return (red * 0.299 + green * 0.587 + blue * 0.114) < 128
 
-    def on_transparency_change(self, value):
+    def set_transparency_from_slider(self, value):
         if value is None:
-            return
+            return None
         percent = float(value)
-        self.transparency = max(0.2, min(1.0, percent / 100.0))
-        self.transparency_text.set(f"{int(round(percent))}%")
+        return max(0.2, min(1.0, percent / 100.0)), int(round(percent))
+
+    def apply_window_transparency(self):
         try:
-            self.attributes("-alpha", self.transparency)
+            self.attributes("-alpha", self.game_transparency)
             if self.menu and self.menu.winfo_exists():
-                self.menu.attributes("-alpha", self.transparency)
+                self.menu.attributes("-alpha", self.menu_transparency)
             self.update_idletasks()
         except tk.TclError:
             pass
+
+    def on_game_transparency_change(self, value):
+        result = self.set_transparency_from_slider(value)
+        if result is None:
+            return
+        self.game_transparency, percent = result
+        self.game_transparency_text.set(f"{percent}%")
+        self.apply_window_transparency()
+        self.save()
+
+    def on_menu_transparency_change(self, value):
+        result = self.set_transparency_from_slider(value)
+        if result is None:
+            return
+        self.menu_transparency, percent = result
+        self.menu_transparency_text.set(f"{percent}%")
+        self.apply_window_transparency()
         self.save()
 
     def toggle_dark_theme(self):
@@ -3814,6 +4702,7 @@ class TypeCast(tk.Tk):
         if not hasattr(self, "banked_keys_text"):
             self.banked_keys_text = tk.StringVar(value=str(self.banked_keys))
         self.banked_keys_text.set(str(self.banked_keys))
+        self.depth_tokens_text.set(str(self.depth_tokens))
         self.play_time_text.set(self.format_play_time(self.total_played_seconds + (time.time() - self.play_timer_started_at)))
         blessing_count = self.stored_blessing_count()
         trophy_slots = self.blessing_trophy_slots()
@@ -3825,6 +4714,16 @@ class TypeCast(tk.Tk):
         self.autosell_text.set(self.autosell_status_text())
         self.banked_upgrade_text.set(self.banked_upgrade_status_text())
         self.fishing_spot_text.set(self.fishing_spot_status_text())
+        if self.ocean_unlocked:
+            region = self.ocean_depth_name(self.selected_ocean_depth) if self.active_region == "ocean" else "currently in Ponds"
+            self.ocean_status_text.set(
+                f"Depth Tokens: {self.depth_tokens:,} | {region} | "
+                f"Shop rotates in {max(0, OCEAN_SHOP_ROTATION_CATCHES - self.ocean_shop_catches)} Ocean catches"
+            )
+        else:
+            requirements = self.ocean_entry_requirements()
+            completed = sum(1 for met in requirements.values() if met)
+            self.ocean_status_text.set(f"Locked — entry requirements {completed}/{len(requirements)} complete")
         self.relic_text.set(self.relic_status_text())
         self.potion_text.set(self.potion_status_text())
         self.blessing_text.set(self.blessing_status_text())
@@ -3832,7 +4731,8 @@ class TypeCast(tk.Tk):
         if self.menu and self.menu.winfo_exists():
             has_relic_tab = "Relics" in self.menu_tab_frames
             has_potions_tab = "Potions" in self.menu_tab_frames
-            if self.player_has_relics() != has_relic_tab or self.player_has_potions() != has_potions_tab:
+            ocean_info_changed = self.ocean_unlocked != self.info_ocean_tab_visible
+            if self.player_has_relics() != has_relic_tab or self.player_has_potions() != has_potions_tab or ocean_info_changed:
                 self.close_menu()
                 self.build_menu()
                 return
@@ -3906,15 +4806,22 @@ class TypeCast(tk.Tk):
                 for potion in self.owned_potions_in_display_order():
                     count = safe_int(self.stored_potions.get(potion["id"], 0))
                     self.potion_list.insert(tk.END, f"{potion['rarity']} {potion['name']} x{count} - {self.potion_effect_text(potion)}")
-                active_potions = sorted(self.potions, key=lambda potion: float(potion.get("expires_at", 0)))
+                active_potions = sorted(
+                    self.potions,
+                    key=lambda active: next(
+                        (index for index, potion in enumerate(POTIONS) if potion["id"] == active.get("id")),
+                        len(POTIONS),
+                    ),
+                )
                 if self.owned_potions_in_display_order() and active_potions:
                     self.potion_list.insert(tk.END, "")
                 for active_potion in active_potions:
                     potion = self.potion_by_id(active_potion.get("id"))
                     if not potion:
                         continue
-                    remaining = max(0, int(float(active_potion.get("expires_at", 0)) - time.time()))
-                    self.potion_list.insert(tk.END, f"Active: {potion['rarity']} {potion['name']} - {self.potion_effect_text(potion)} - {self.format_play_time(remaining)} left")
+                    remaining = max(0, safe_int(active_potion.get("remaining", 0)))
+                    unit = potion.get("duration_type", "charges")
+                    self.potion_list.insert(tk.END, f"Active: {potion['rarity']} {potion['name']} - {remaining:,} {unit} left - {self.potion_effect_text(potion)}")
 
             self.collection_list.delete(0, tk.END)
             rarity_order = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Secret", "Ultra Rare"]
@@ -3979,6 +4886,31 @@ class TypeCast(tk.Tk):
                 else:
                     self.collection_list.insert(tk.END, f"  {skin['name']}")
                     self.collection_list.itemconfig(row_index, fg=self.collection_missing_fg)
+
+            ocean_caught = sum(
+                1 for fish in OCEAN_COLLECTION
+                if safe_int(self.collection_log.get(fish_collection_key(fish["rarity"], fish["name"]), {}).get("count", 0)) > 0
+            )
+            if self.collection_list.size() > 0:
+                self.collection_list.insert(tk.END, "")
+            header_index = self.collection_list.size()
+            self.collection_list.insert(tk.END, f"OCEAN COLLECTION {ocean_caught}/{len(OCEAN_COLLECTION)}")
+            self.collection_list.itemconfig(header_index, fg=self.collection_header_fg)
+            for rarity in ("Common", "Uncommon", "Rare", "Epic", "Eternal"):
+                rarity_fish = [fish for fish in OCEAN_COLLECTION if fish["rarity"] == rarity]
+                if not rarity_fish:
+                    continue
+                for fish in rarity_fish:
+                    key = fish_collection_key(rarity, fish["name"])
+                    entry = self.collection_log.get(key)
+                    row_index = self.collection_list.size()
+                    depth_text = f" | {fish['min_depth']:,} m+"
+                    if entry:
+                        self.collection_list.insert(tk.END, f"  {rarity} {fish['name']} x{safe_int(entry.get('count', 0))}{depth_text}")
+                        self.collection_list.itemconfig(row_index, fg=self.collection_caught_fg)
+                    else:
+                        self.collection_list.insert(tk.END, f"  {rarity} {fish['name']}{depth_text}")
+                        self.collection_list.itemconfig(row_index, fg=self.collection_missing_fg)
 
             self.achievements_list.delete(0, tk.END)
             for achievement in ACHIEVEMENTS:
@@ -4048,13 +4980,44 @@ class TypeCast(tk.Tk):
                 else:
                     self.fishing_spot_list.insert(tk.END, f"Locked - {spot['name']} - {self.fishing_spot_cost_text(spot)}")
 
+            self.ocean_depth_list.delete(0, tk.END)
+            for depth in self.ocean_depth_sequence():
+                active = " [active]" if self.active_region == "ocean" and depth == self.selected_ocean_depth else ""
+                if depth in self.ocean_unlocked_depths:
+                    self.ocean_depth_list.insert(tk.END, f"Unlocked - {self.ocean_depth_name(depth)}{active}")
+                else:
+                    self.ocean_depth_list.insert(tk.END, f"Locked - {self.ocean_depth_name(depth)} - {self.ocean_depth_cost(depth):,} Depth Tokens")
+
+            self.ocean_shop_list.delete(0, tk.END)
+            self.ocean_shop_display_ids = list(self.ocean_shop_stock) + sorted(
+                self.ocean_owned_items,
+                key=lambda item_id: (OCEAN_EQUIPMENT_BY_ID[item_id]["slot"], OCEAN_EQUIPMENT_BY_ID[item_id]["name"]),
+            )
+            for item_id in self.ocean_shop_display_ids:
+                item = OCEAN_EQUIPMENT_BY_ID[item_id]
+                if item_id in self.ocean_owned_items:
+                    equipped = " [equipped]" if self.ocean_loadout.get(item["slot"]) == item_id else ""
+                    self.ocean_shop_list.insert(tk.END, f"Owned - {item['slot'].title()} - {item['name']}{equipped}")
+                else:
+                    self.ocean_shop_list.insert(tk.END, f"Offer - {item['slot'].title()} - {item['name']} - {item['cost']:,} DT")
+            if not self.ocean_shop_display_ids:
+                self.ocean_shop_list.insert(tk.END, "All permanent Ocean equipment owned")
+
             for listbox, state in listbox_states.items():
                 self.restore_listbox_view_state(listbox, state)
+            self.update_ocean_item_detail()
 
         equipment_lines = []
         for slot in EQUIPMENT_SLOTS:
             item = self.current_equipment_item(slot)
             equipment_lines.append(f"{slot.title()} Lv {self.equipment_levels[slot]} - {item['name']} - {self.item_effect_text(slot, item)}")
+        if self.ocean_unlocked:
+            equipment_lines.append("Ocean loadout (active in both regions):")
+            for slot in OCEAN_EQUIPMENT_SLOTS:
+                item = self.ocean_equipped_item(slot)
+                equipment_lines.append(
+                    f"{slot.title()} - {item['name']} - {item['effect']}" if item else f"{slot.title()} - empty"
+                )
         if hasattr(self, "equipment_text"):
             self.equipment_text.set("\n".join(equipment_lines))
         reduction = round((1 - self.stroke_multiplier()) * 100)
@@ -4134,6 +5097,20 @@ class TypeCast(tk.Tk):
             "equipment_all_10": lambda: all(level >= 10 for level in self.equipment_levels.values()),
             "equipment_all_max": lambda: all(self.equipment_levels[slot] >= len(EQUIPMENT_TRACKS[slot]) - 1 for slot in EQUIPMENT_SLOTS),
             "spots_all": lambda: len(self.unlocked_fishing_spots) >= len(FISHING_SPOTS),
+            "ocean_first_entry": lambda: self.ocean_unlocked,
+            "ocean_first_catch": lambda: self.ocean_catches >= 1,
+            "ocean_depth_10": lambda: 10 in self.ocean_unlocked_depths,
+            "ocean_depth_25": lambda: 25 in self.ocean_unlocked_depths,
+            "ocean_depth_50": lambda: 50 in self.ocean_unlocked_depths,
+            "ocean_depth_100": lambda: 100 in self.ocean_unlocked_depths,
+            "ocean_depth_1000": lambda: max(self.ocean_unlocked_depths or {0}) >= 1000,
+            "ocean_depth_10000": lambda: max(self.ocean_unlocked_depths or {0}) >= 10000,
+            "ocean_eternal": lambda: any(
+                safe_int(self.collection_log.get(fish_collection_key("Eternal", creature["name"]), {}).get("count", 0)) > 0
+                for creature in OCEAN_CREATURES if creature.get("rarity") == "Eternal"
+            ),
+            "ocean_loadout": lambda: all(self.ocean_loadout.get(slot) for slot in OCEAN_EQUIPMENT_SLOTS),
+            "ocean_shop_10": lambda: len(self.ocean_owned_items) >= 10,
         }
         return criteria.get(achievement_id, lambda: False)()
 
@@ -4148,6 +5125,7 @@ class TypeCast(tk.Tk):
                 newly_unlocked.append(achievement["name"])
         if newly_unlocked:
             self.last_message = f"Achievement unlocked: {newly_unlocked[-1]}"
+            self.mark_save_dirty()
 
     def blend_hex_color(self, color, background, amount):
         amount = max(0.0, min(1.0, amount))
@@ -4191,7 +5169,7 @@ class TypeCast(tk.Tk):
         canvas.create_line(shifted_points, fill=shadow, width=width, capstyle=tk.ROUND, smooth=True)
 
     def draw_fisher_cat(self, canvas, shoreline, stone_color):
-        if self.draw_asset_image(canvas, 34, 101, "cat", "aphrodite.png"):
+        if self.draw_asset_image(canvas, 274, 101, "cat", "aphrodite.png"):
             return
         fur = "#20242a" if not self.dark_theme else "#14181d"
         fur_shadow = "#111418" if not self.dark_theme else "#080a0d"
@@ -4241,7 +5219,7 @@ class TypeCast(tk.Tk):
             if item not in existing_items:
                 canvas.scale(item, BASE_OVERLAY_WIDTH / 2, 0, -1, 1)
 
-    def resource_delta_position(self, resource, minimized):
+    def resource_delta_position(self, resource, minimized: Union[bool, str]):
         if minimized == "vertical":
             positions = {"coins": (67, 126), "keys": (67, 156), "banked_keys": (67, 186)}
         elif minimized:
@@ -4250,7 +5228,7 @@ class TypeCast(tk.Tk):
             positions = {"coins": (58, 143), "keys": (130, 143), "banked_keys": (206, 143)}
         return positions.get(resource, (160, 184))
 
-    def draw_resource_deltas(self, canvas, panel_fill, panel_outline, minimized=False):
+    def draw_resource_deltas(self, canvas, panel_fill, panel_outline, minimized: Union[bool, str] = False):
         if not self.resource_deltas:
             return
         now = time.time()
@@ -4341,8 +5319,13 @@ class TypeCast(tk.Tk):
 
         stat_y = h - 76
         stat_width = int((w - 18) * self.game_scale)
+        primary_currency = (
+            f"DT {self.compact_number_text(self.depth_tokens)}"
+            if self.active_region == "ocean"
+            else f"C {self.compact_number_text(self.coins)}"
+        )
         compact_stats = [
-            f"C {self.compact_number_text(self.coins)}",
+            primary_currency,
             f"F {self.regular_inventory_count()}/{self.inventory_limit}",
             f"CT {self.compact_number_text(self.banked_keys)}",
         ]
@@ -4384,7 +5367,6 @@ class TypeCast(tk.Tk):
             (
                 ("fish", "names", f"{name_slug}.png"),
                 ("fish", "rarity", f"{rarity_slug}.png"),
-                ("fish", "default.png"),
             )
         )
         return self.draw_first_asset_image(canvas, 120 + fish_x, 118, candidates)
@@ -4484,7 +5466,12 @@ class TypeCast(tk.Tk):
             canvas.create_rectangle(bar_x0, bar_y0, bar_x1, bar_y1, fill=progress_bg, outline=menu_outline)
             canvas.create_rectangle(bar_x0, bar_y0, bar_x0 + int((bar_x1 - bar_x0) * progress), bar_y1, fill="#4aa7a1", outline="")
             canvas.create_text(panel_x0 + 12, panel_y0 + 41, text=status_line, anchor="nw", fill=panel_subtext_color, font=self.overlay_font(8))
-            stats_line = f"{self.coins} coins | {self.regular_inventory_count()}/{self.inventory_limit}"
+            currency_text = (
+                f"{self.depth_tokens} DT"
+                if self.active_region == "ocean"
+                else f"{self.coins} coins"
+            )
+            stats_line = f"{currency_text} | {self.regular_inventory_count()}/{self.inventory_limit}"
             if autosell_countdown:
                 stats_line = f"{stats_line} | {autosell_countdown}"
             canvas.create_text(panel_x1 - 12, panel_y0 + 41, text=stats_line, anchor="ne", fill=panel_subtext_color, font=self.overlay_font(8))
@@ -4569,8 +5556,9 @@ class TypeCast(tk.Tk):
                 canvas.create_oval(sx - 2, sy - 2, sx + 2, sy + 2, fill="#ffd166", outline="")
 
         scene_asset_candidates = (
-            ("scenes", f"{asset_slug(self.selected_fishing_spot)}.png"),
-            ("scenes", "default.png"),
+            (("scenes", "ocean.png"),)
+            if self.active_region == "ocean"
+            else (("scenes", f"{asset_slug(self.selected_fishing_spot)}.png"), ("scenes", "default.png"))
         )
         if self.has_asset_image(scene_asset_candidates):
             scene_clear = self.theme_palette()["bg"] if ACTIVE_DESKTOP_MODE else TRANSPARENT_COLOR
@@ -4605,43 +5593,45 @@ class TypeCast(tk.Tk):
         rod_width = rod_style["width"]
         rod_points = (42, 72 + rod_offset, 177, 38 + rod_offset)
 
-        self.draw_line_shadow(canvas, [(42, 72 + rod_offset), (177, 38 + rod_offset)], shoreline, width=rod_width + 4, offset=(4, 5))
-        self.draw_line_shadow(canvas, [(34, 80 + rod_offset), (62, 72 + rod_offset)], shoreline, width=13, offset=(4, 5))
-        self.draw_soft_oval_shadow(canvas, 84, 63 + rod_offset, 108, 84 + rod_offset, shoreline, 0.24)
-        if rod_style["glow"]:
-            canvas.create_line(40, 74 + rod_offset, 178, 37 + rod_offset, fill=rod_style["glow"], width=rod_width + 7, capstyle=tk.ROUND)
-        canvas.create_line(39, 77 + rod_offset, 176, 39 + rod_offset, fill=rod_shadow, width=rod_width + 3, capstyle=tk.ROUND)
-        canvas.create_line(*rod_points, fill=rod_body, width=rod_width, capstyle=tk.ROUND)
-        canvas.create_line(46, 69 + rod_offset, 159, 40 + rod_offset, fill=rod_highlight, width=2, capstyle=tk.ROUND)
-        canvas.create_line(34, 80 + rod_offset, 62, 72 + rod_offset, fill=handle, width=12, capstyle=tk.ROUND)
-        canvas.create_line(37, 76 + rod_offset, 63, 69 + rod_offset, fill=rod_style["wrap"], width=4, capstyle=tk.ROUND)
-        for index, band_color in enumerate(rod_style["bands"]):
-            bx = 71 + index * 29
-            by = 64 - index * 8 + rod_offset
-            canvas.create_line(bx - 5, by + 5, bx + 7, by + 2, fill=band_color, width=3, capstyle=tk.ROUND)
-        canvas.create_oval(84, 58 + rod_offset, 106, 80 + rod_offset, fill=rod_style["reel"], outline=metal, width=2)
-        canvas.create_oval(90, 64 + rod_offset, 100, 74 + rod_offset, fill=metal, outline="")
-        canvas.create_line(101, 70 + rod_offset, 116, 80 + rod_offset, fill=metal, width=3, capstyle=tk.ROUND)
-        for gx, gy in ((126, 51), (153, 43), (176, 39)):
-            canvas.create_oval(gx - 3, gy - 3 + rod_offset, gx + 3, gy + 3 + rod_offset, outline=metal, width=2)
-        if rod_style["gem"]:
-            canvas.create_oval(171, 34 + rod_offset, 181, 44 + rod_offset, fill=rod_style["gem"], outline=metal, width=1)
-            canvas.create_oval(174, 36 + rod_offset, 177, 39 + rod_offset, fill="#ffffff", outline="")
-        if rod_level >= 9:
-            sparkle_color = rod_style["gem"] or rod_highlight
-            canvas.create_line(137, 43 + rod_offset, 137, 49 + rod_offset, fill=sparkle_color, width=1)
-            canvas.create_line(134, 46 + rod_offset, 140, 46 + rod_offset, fill=sparkle_color, width=1)
-        canvas.create_line(176, 39 + rod_offset, 218, 115 + rod_offset, fill=line_color, width=2)
-        self.draw_soft_oval_shadow(canvas, 210, 120 + rod_offset, 227, 129 + rod_offset, pond_fill, 0.26)
-        canvas.create_oval(211, 111 + rod_offset, 225, 125 + rod_offset, fill="#e34f4f", outline="#702929", width=2)
-        canvas.create_oval(215, 114 + rod_offset, 220, 119 + rod_offset, fill="#ffd1d1", outline="")
-        self.draw_first_asset_image(
+        rod_name_slug = asset_slug(EQUIPMENT_TRACKS["rod"][rod_level]["name"])
+        rod_asset_drawn = self.draw_first_asset_image(
             canvas,
             108,
             60 + rod_offset,
-            (("rod", f"level_{rod_level}.png"), ("rod", "default.png")),
+            (("rod", "names", f"{rod_name_slug}.png"), ("rod", f"level_{rod_level}.png"), ("rod", "default.png")),
         )
-        self.draw_asset_image(canvas, 218, 118 + rod_offset, "rod", "bobber.png")
+        if not rod_asset_drawn:
+            self.draw_line_shadow(canvas, [(42, 72 + rod_offset), (177, 38 + rod_offset)], shoreline, width=rod_width + 4, offset=(4, 5))
+            self.draw_line_shadow(canvas, [(34, 80 + rod_offset), (62, 72 + rod_offset)], shoreline, width=13, offset=(4, 5))
+            self.draw_soft_oval_shadow(canvas, 84, 63 + rod_offset, 108, 84 + rod_offset, shoreline, 0.24)
+            if rod_style["glow"]:
+                canvas.create_line(40, 74 + rod_offset, 178, 37 + rod_offset, fill=rod_style["glow"], width=rod_width + 7, capstyle=tk.ROUND)
+            canvas.create_line(39, 77 + rod_offset, 176, 39 + rod_offset, fill=rod_shadow, width=rod_width + 3, capstyle=tk.ROUND)
+            canvas.create_line(*rod_points, fill=rod_body, width=rod_width, capstyle=tk.ROUND)
+            canvas.create_line(46, 69 + rod_offset, 159, 40 + rod_offset, fill=rod_highlight, width=2, capstyle=tk.ROUND)
+            canvas.create_line(34, 80 + rod_offset, 62, 72 + rod_offset, fill=handle, width=12, capstyle=tk.ROUND)
+            canvas.create_line(37, 76 + rod_offset, 63, 69 + rod_offset, fill=rod_style["wrap"], width=4, capstyle=tk.ROUND)
+            for index, band_color in enumerate(rod_style["bands"]):
+                bx = 71 + index * 29
+                by = 64 - index * 8 + rod_offset
+                canvas.create_line(bx - 5, by + 5, bx + 7, by + 2, fill=band_color, width=3, capstyle=tk.ROUND)
+            canvas.create_oval(84, 58 + rod_offset, 106, 80 + rod_offset, fill=rod_style["reel"], outline=metal, width=2)
+            canvas.create_oval(90, 64 + rod_offset, 100, 74 + rod_offset, fill=metal, outline="")
+            canvas.create_line(101, 70 + rod_offset, 116, 80 + rod_offset, fill=metal, width=3, capstyle=tk.ROUND)
+            for gx, gy in ((126, 51), (153, 43), (176, 39)):
+                canvas.create_oval(gx - 3, gy - 3 + rod_offset, gx + 3, gy + 3 + rod_offset, outline=metal, width=2)
+            if rod_style["gem"]:
+                canvas.create_oval(171, 34 + rod_offset, 181, 44 + rod_offset, fill=rod_style["gem"], outline=metal, width=1)
+                canvas.create_oval(174, 36 + rod_offset, 177, 39 + rod_offset, fill="#ffffff", outline="")
+            if rod_level >= 9:
+                sparkle_color = rod_style["gem"] or rod_highlight
+                canvas.create_line(137, 43 + rod_offset, 137, 49 + rod_offset, fill=sparkle_color, width=1)
+                canvas.create_line(134, 46 + rod_offset, 140, 46 + rod_offset, fill=sparkle_color, width=1)
+        canvas.create_line(176, 39 + rod_offset, 218, 115 + rod_offset, fill=line_color, width=2)
+        self.draw_soft_oval_shadow(canvas, 210, 120 + rod_offset, 227, 129 + rod_offset, pond_fill, 0.26)
+        if not self.draw_asset_image(canvas, 218, 118 + rod_offset, "rod", "bobber.png"):
+            canvas.create_oval(211, 111 + rod_offset, 225, 125 + rod_offset, fill="#e34f4f", outline="#702929", width=2)
+            canvas.create_oval(215, 114 + rod_offset, 220, 119 + rod_offset, fill="#ffd1d1", outline="")
         self.draw_fisher_cat(canvas, shoreline, stone_color)
 
         if self.hooked_fish:
@@ -4654,7 +5644,7 @@ class TypeCast(tk.Tk):
             canvas.create_arc(68 + fish_x - pulse, 92 - pulse, 178 + fish_x + pulse, 149 + pulse, start=205, extent=132, style=tk.ARC, outline=pond_highlight, width=2)
             fish_asset_drawn = self.draw_hooked_fish_asset(canvas, fish, fish_x)
             if fish_asset_drawn:
-                pass
+                self.draw_fish_sparkles(canvas, fish, fish_x, pond_highlight)
             elif fish.kind == "chest":
                 chest_w = 64
                 chest_x = 68 + fish_x + (110 - chest_w) // 2
@@ -4694,6 +5684,13 @@ class TypeCast(tk.Tk):
             else:
                 self.draw_fish_sparkles(canvas, fish, fish_x, pond_highlight)
                 part_colors = self.pride_fish_part_colors(fish, fish.color, fin_color)
+                if getattr(fish, "gilded", False):
+                    part_colors = {
+                        "body": "#f5c84c",
+                        "tail": "#d99b24",
+                        "top_fin": "#ffe28a",
+                        "bottom_fin": "#c98220",
+                    }
                 if part_colors.get("body_gradient"):
                     self.draw_gradient_fish_body(canvas, fish_x, fish_outline, part_colors["body_gradient"])
                     self.draw_gradient_fish_tail(canvas, fish_x, fish_outline, part_colors.get("tail_gradient", part_colors["body_gradient"]))
@@ -4762,6 +5759,8 @@ class TypeCast(tk.Tk):
             if progress_label:
                 canvas.create_text(progress_x, panel_y0 + 8, text=progress_label, anchor="ne", fill=panel_text_color, font=self.overlay_font(9, "bold"))
             stats_line = f"{self.coins} coins | {self.regular_inventory_count()}/{self.inventory_limit} fish"
+            if self.active_region == "ocean":
+                stats_line = f"{self.depth_tokens} DT | {self.regular_inventory_count()}/{self.inventory_limit} fish"
             if autosell_countdown:
                 stats_line = f"{stats_line} | {autosell_countdown}"
             blessing_compact = self.blessing_compact_status_text()
@@ -4869,7 +5868,21 @@ class TypeCast(tk.Tk):
                 "stone_color": "#3f3432" if self.dark_theme else "#6f5a52",
                 "accent": "lava",
             },
+            "ocean": {
+                "pond_fill": "#071c35" if self.dark_theme else "#72c9e8",
+                "pond_outline": "#174d70" if self.dark_theme else "#3d91b7",
+                "ripple_color": "#2b7894" if self.dark_theme else "#d9f8ff",
+                "pond_shadow": "#030d1b" if self.dark_theme else "#5eb1cf",
+                "pond_inner": "#0b3b5b" if self.dark_theme else "#4db5dc",
+                "pond_highlight": "#55d7e5" if self.dark_theme else "#efffff",
+                "shoreline": "#12283a" if self.dark_theme else "#d7eef0",
+                "reed_color": "#287c7a" if self.dark_theme else "#4da99c",
+                "stone_color": "#40586a" if self.dark_theme else "#a8c5cd",
+                "accent": "glow",
+            },
         }
+        if self.active_region == "ocean":
+            return styles["ocean"]
         return styles.get(self.selected_fishing_spot, styles["pond"])
 
     def on_overlay_press(self, event):
@@ -5058,14 +6071,7 @@ class TypeCast(tk.Tk):
         return f"Relics: {', '.join(parts)} | {' | '.join(rates)}"
 
     def potion_effect_text(self, potion):
-        effects = []
-        key_rate = safe_int(potion.get("keys", 0))
-        coin_rate = safe_int(potion.get("coins", 0))
-        if key_rate:
-            effects.append(f"+{key_rate} Cast Tokens / 5 min")
-        if coin_rate:
-            effects.append(f"+{coin_rate} coins / 5 min")
-        return " | ".join(effects) if effects else "quietly bubbles"
+        return str(potion.get("effect", "quietly bubbles"))
 
     def potion_status_text(self):
         self.cleanup_active_potions()
@@ -5081,14 +6087,14 @@ class TypeCast(tk.Tk):
                 continue
             suffix = f" x{count}" if count > 1 else ""
             parts.append(f"{potion['name']}{suffix} ready")
-        rates = []
-        key_rate = self.potion_key_rate()
-        coin_rate = self.potion_coin_rate()
-        if key_rate:
-            rates.append(f"+{key_rate} Cast Tokens / 5 min")
-        if coin_rate:
-            rates.append(f"+{coin_rate} coins / 5 min")
-        active_text = f"Active {' | '.join(rates)}" if rates else ""
+        active_parts = []
+        for active in self.potions:
+            potion = self.potion_by_id(active.get("id"))
+            if potion:
+                active_parts.append(
+                    f"{potion['name']} {safe_int(active.get('remaining', 0)):,} {potion.get('duration_type', 'charges')}"
+                )
+        active_text = f"Active: {' | '.join(active_parts)}" if active_parts else ""
         if parts and active_text:
             return f"Potions: {', '.join(parts)} | {active_text}"
         if parts:
@@ -5194,14 +6200,15 @@ class TypeCast(tk.Tk):
 
     def stroke_multiplier(self):
         base = self.current_equipment_item("rod").get("stroke_mult", 1.0)
-        return base
+        return base * self.ocean_equipment_effect("stroke_mult")
 
     def rod_blessing_progress_multiplier(self):
         bonus = self.blessing_bonus("rod")
         return 1.0 / max(0.45, 1 - bonus) if bonus > 0 else 1.0
 
     def luck_bonus(self):
-        return self.current_equipment_item("body").get("luck", 0) + int(round(self.blessing_bonus("body")))
+        ocean_luck = safe_int(self.ocean_equipped_item("sonar").get("pond_luck", 0))
+        return self.current_equipment_item("body").get("luck", 0) + int(round(self.blessing_bonus("body"))) + ocean_luck
 
     def accuracy_chance(self):
         return min(0.08, self.current_equipment_item("head").get("accuracy", 0.0) + self.blessing_bonus("head"))
@@ -5210,7 +6217,8 @@ class TypeCast(tk.Tk):
         return 1.0
 
     def banked_key_bonus(self):
-        return min(0.22, self.current_equipment_item("legs").get("banked_bonus", 0.0) + self.blessing_bonus("legs"))
+        ocean_bonus = float(self.ocean_equipped_item("lure").get("pond_banked_bonus", 0.0))
+        return min(0.29, self.current_equipment_item("legs").get("banked_bonus", 0.0) + self.blessing_bonus("legs") + ocean_bonus)
 
     def auto_cast_seconds(self):
         return AUTO_CAST_SECONDS * self.cast_multiplier()
@@ -5318,6 +6326,16 @@ class TypeCast(tk.Tk):
         self.unlocked_fishing_spots = {"pond"}
         self.selected_fishing_spot = "pond"
         self.equipment_levels = DEFAULT_EQUIPMENT_LEVELS.copy()
+        self.ocean_unlocked = False
+        self.active_region = "ponds"
+        self.depth_tokens = 0
+        self.ocean_unlocked_depths = {0}
+        self.selected_ocean_depth = 0
+        self.ocean_catches = 0
+        self.ocean_shop_catches = 0
+        self.ocean_shop_stock = []
+        self.ocean_owned_items = set()
+        self.ocean_loadout = {slot: "" for slot in OCEAN_EQUIPMENT_SLOTS}
         self.hooked_fish = None
         self.cast_started_at = time.time()
         self.fish_clicks = 0
@@ -5341,6 +6359,7 @@ class TypeCast(tk.Tk):
                 pass
             except OSError:
                 pass
+        self.mark_save_dirty(urgent=True)
         self.refresh_all()
 
     def load_equipment_levels(self, data):
@@ -5389,7 +6408,6 @@ class TypeCast(tk.Tk):
         if not isinstance(saved_potions, list):
             return []
         valid_ids = {potion["id"] for potion in POTIONS}
-        now = time.time()
         potions = []
         for active_potion in saved_potions:
             if not isinstance(active_potion, dict):
@@ -5397,12 +6415,24 @@ class TypeCast(tk.Tk):
             potion_id = str(active_potion.get("id", ""))
             if potion_id not in valid_ids:
                 continue
-            try:
-                expires_at = float(active_potion.get("expires_at", 0))
-            except (TypeError, ValueError):
-                continue
-            if expires_at > now:
-                potions.append({"id": potion_id, "expires_at": expires_at})
+            potion = self.potion_by_id(potion_id) or {}
+            remaining = safe_int(active_potion.get("remaining", 0))
+            if remaining <= 0 and active_potion.get("expires_at"):
+                try:
+                    seconds_left = max(0.0, float(active_potion.get("expires_at", 0)) - time.time())
+                except (TypeError, ValueError):
+                    seconds_left = 0.0
+                remaining = max(1, round(safe_int(potion.get("charges", 1)) * min(1.0, seconds_left / POTION_DURATION_SECONDS))) if seconds_left > 0 else 0
+            if remaining > 0:
+                potions.append(
+                    {
+                        "id": potion_id,
+                        "remaining": remaining,
+                        "counter": max(0, safe_int(active_potion.get("counter", 0))),
+                        "streak": max(0, safe_int(active_potion.get("streak", 0))),
+                        "last_key_at": float(active_potion.get("last_key_at", 0.0) or 0.0),
+                    }
+                )
         return potions
 
     def normalize_stored_potions(self, data):
@@ -5507,7 +6537,17 @@ class TypeCast(tk.Tk):
         progress = max(0.0, min(progress, strokes - 0.001))
         if not name or not rarity:
             return None
-        return HookedFish(name=name, rarity=rarity, strokes=strokes, value=value, color=color, kind=kind, progress=progress, spot_id=spot_id, blessing_id=blessing_id, blessing_slot=blessing_slot, blessing_bonus=blessing_bonus, skin_id=skin_id, skin_name=skin_name, skin_colors=skin_colors)
+        try:
+            chest_reward_mult = max(1.0, float(saved_fish.get("chest_reward_mult", 1.0)))
+        except (TypeError, ValueError):
+            chest_reward_mult = 1.0
+        return HookedFish(
+            name=name, rarity=rarity, strokes=strokes, value=value, color=color, kind=kind,
+            progress=progress, spot_id=spot_id, blessing_id=blessing_id,
+            blessing_slot=blessing_slot, blessing_bonus=blessing_bonus, skin_id=skin_id,
+            skin_name=skin_name, skin_colors=skin_colors, gilded=bool(saved_fish.get("gilded", False)),
+            chest_reward_mult=chest_reward_mult,
+        )
 
     def load(self):
         save_path, data = find_save_to_load()
@@ -5517,9 +6557,14 @@ class TypeCast(tk.Tk):
         self.coins = int(data.get("coins", 0))
         self.total_keystrokes = int(data.get("total_keystrokes", 0))
         self.total_played_seconds = float(data.get("total_played_seconds", 0.0))
-        self.transparency = float(data.get("transparency", 1.0))
-        self.transparency_percent.set(min(100, max(20, self.transparency * 100)))
-        self.transparency_text.set(f"{int(round(self.transparency * 100))}%")
+        legacy_transparency = float(data.get("transparency", 1.0))
+        self.game_transparency = max(0.2, min(1.0, float(data.get("game_transparency", legacy_transparency))))
+        self.menu_transparency = max(0.2, min(1.0, float(data.get("menu_transparency", legacy_transparency))))
+        self.game_transparency_percent.set(min(100, max(20, self.game_transparency * 100)))
+        self.menu_transparency_percent.set(min(100, max(20, self.menu_transparency * 100)))
+        self.game_transparency_text.set(f"{int(round(self.game_transparency * 100))}%")
+        self.menu_transparency_text.set(f"{int(round(self.menu_transparency * 100))}%")
+        self.apply_window_transparency()
         custom_primary = str(data.get("custom_primary_color", self.custom_primary_color)).strip()
         custom_secondary = str(data.get("custom_secondary_color", self.custom_secondary_color)).strip()
         if self.valid_hex_color(custom_primary):
@@ -5589,11 +6634,39 @@ class TypeCast(tk.Tk):
         if self.selected_fishing_spot not in self.unlocked_fishing_spots:
             self.selected_fishing_spot = "pond"
         self.equipment_levels = self.load_equipment_levels(data)
+        self.ocean_unlocked = bool(data.get("ocean_unlocked", False))
+        self.active_region = str(data.get("active_region", "ponds"))
+        if self.active_region not in ("ponds", "ocean") or (self.active_region == "ocean" and not self.ocean_unlocked):
+            self.active_region = "ponds"
+        self.depth_tokens = max(0, safe_int(data.get("depth_tokens", 0)))
+        saved_depths = data.get("ocean_unlocked_depths", [0])
+        self.ocean_unlocked_depths = {
+            max(0, safe_int(depth)) for depth in saved_depths
+        } if isinstance(saved_depths, list) else {0}
+        self.ocean_unlocked_depths.add(0)
+        self.selected_ocean_depth = max(0, safe_int(data.get("selected_ocean_depth", 0)))
+        if self.selected_ocean_depth not in self.ocean_unlocked_depths:
+            self.selected_ocean_depth = max(self.ocean_unlocked_depths)
+        self.ocean_catches = max(0, safe_int(data.get("ocean_catches", 0)))
+        self.ocean_shop_catches = max(0, safe_int(data.get("ocean_shop_catches", 0))) % OCEAN_SHOP_ROTATION_CATCHES
+        owned = data.get("ocean_owned_items", [])
+        self.ocean_owned_items = {item_id for item_id in owned if item_id in OCEAN_EQUIPMENT_BY_ID} if isinstance(owned, list) else set()
+        stock = data.get("ocean_shop_stock", [])
+        self.ocean_shop_stock = [item_id for item_id in stock if item_id in OCEAN_EQUIPMENT_BY_ID] if isinstance(stock, list) else []
+        saved_loadout = data.get("ocean_loadout", {})
+        self.ocean_loadout = {slot: "" for slot in OCEAN_EQUIPMENT_SLOTS}
+        if isinstance(saved_loadout, dict):
+            for slot in OCEAN_EQUIPMENT_SLOTS:
+                item_id = str(saved_loadout.get(slot, ""))
+                item = OCEAN_EQUIPMENT_BY_ID.get(item_id)
+                if item and item["slot"] == slot and item_id in self.ocean_owned_items:
+                    self.ocean_loadout[slot] = item_id
+        self.ensure_ocean_shop_stock()
         self.hooked_fish = self.normalize_hooked_fish(data.get("hooked_fish"))
         if self.hooked_fish is None:
             self.cast_started_at = float(data.get("cast_started_at", time.time()))
 
-    def save(self):
+    def save(self, force=False):
         self.total_played_seconds += time.time() - self.play_timer_started_at
         self.play_timer_started_at = time.time()
         self.cleanup_active_potions()
@@ -5614,12 +6687,16 @@ class TypeCast(tk.Tk):
                 "skin_id": self.hooked_fish.skin_id,
                 "skin_name": self.hooked_fish.skin_name,
                 "skin_colors": self.hooked_fish.skin_colors,
+                "gilded": self.hooked_fish.gilded,
+                "chest_reward_mult": self.hooked_fish.chest_reward_mult,
             }
         data = {
             "coins": self.coins,
             "total_keystrokes": self.total_keystrokes,
             "total_played_seconds": self.total_played_seconds,
-            "transparency": self.transparency,
+            "transparency": self.game_transparency,
+            "game_transparency": self.game_transparency,
+            "menu_transparency": self.menu_transparency,
             "theme": self.theme_name,
             "dark_theme": self.dark_theme,
             "custom_primary_color": self.custom_primary_color,
@@ -5651,6 +6728,16 @@ class TypeCast(tk.Tk):
             "background_key_capture_consent_granted": self.background_key_capture_consent_granted,
             "backpack_level": self.backpack_level,
             "equipment_levels": self.equipment_levels,
+            "ocean_unlocked": self.ocean_unlocked,
+            "active_region": self.active_region,
+            "depth_tokens": self.depth_tokens,
+            "ocean_unlocked_depths": sorted(self.ocean_unlocked_depths),
+            "selected_ocean_depth": self.selected_ocean_depth,
+            "ocean_catches": self.ocean_catches,
+            "ocean_shop_catches": self.ocean_shop_catches,
+            "ocean_shop_stock": self.ocean_shop_stock,
+            "ocean_owned_items": sorted(self.ocean_owned_items),
+            "ocean_loadout": self.ocean_loadout,
             "inventory": self.inventory,
             "relics": self.relics,
             "stored_potions": self.stored_potions,
@@ -5666,21 +6753,55 @@ class TypeCast(tk.Tk):
         try:
             SAVE_FILE.parent.mkdir(parents=True, exist_ok=True)
             temp_file = SAVE_FILE.with_suffix(f"{SAVE_FILE.suffix}.tmp")
-            temp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            payload = json.dumps(data, indent=2)
+            with temp_file.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if load_save_data(temp_file) is None:
+                raise OSError("temporary save failed validation")
+            if SAVE_FILE.exists():
+                if SAVE_BACKUP_FILE.exists():
+                    try:
+                        shutil.copy2(SAVE_BACKUP_FILE, SAVE_PREVIOUS_FILE)
+                    except OSError:
+                        pass
+                try:
+                    shutil.copy2(SAVE_FILE, SAVE_BACKUP_FILE)
+                except OSError as backup_exc:
+                    print(f"[TypeCast save] Could not refresh backup save {SAVE_BACKUP_FILE}: {backup_exc}", file=sys.stderr)
             temp_file.replace(SAVE_FILE)
+            if load_save_data(SAVE_FILE) is None:
+                raise OSError("save failed validation after replace")
             self.last_save_at = time.time()
+            self.save_dirty = False
+            self.last_save_error = ""
             return True
-        except OSError:
+        except OSError as exc:
+            self.last_save_error = str(exc)
+            print(f"[TypeCast save] Failed to save {SAVE_FILE}: {exc}", file=sys.stderr)
             return False
 
     def on_close(self):
+        if self.pending_save_after_id is not None:
+            try:
+                self.after_cancel(self.pending_save_after_id)
+            except tk.TclError:
+                pass
+            self.pending_save_after_id = None
+        if not self.save(force=True):
+            messagebox.showerror(
+                "Save Failed",
+                f"TypeCast could not write your save file:\n{SAVE_FILE}\n\n{self.last_save_error or 'Unknown error'}",
+                parent=self.menu if self.menu is not None else self,
+            )
+            return
         if self.discord:
             try:
                 self.discord.close()
             except Exception:
                 pass
         self.key_poller.close()
-        self.save()
         self.destroy()
 
 
