@@ -51,24 +51,6 @@ Discord Rich Presence is optional:
 python3 -m pip install pypresence
 ```
 
-## GitHub Setup
-
-This folder is ready to upload as its own GitHub repo.
-
-Upload the contents of this `linuxbuild` folder, not the parent `dist` folder. The repo should look like this:
-
-```text
-main.py
-assets/
-README.md
-run_typecast.sh
-update_typecast.sh
-install_gnome_launcher.sh
-typecast_config.example.json
-```
-
-Do not upload your personal `typecast_config.json`. It is ignored by `.gitignore` so each player can keep their own keyboard device and settings.
-
 First-time install from GitHub:
 
 ```bash
